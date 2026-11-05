@@ -31,11 +31,16 @@ private final class ClipRowView: NSTableRowView {
 
 private final class ClipCellView: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("ClipCell")
+    static let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+    /// Horizontal space the cell uses around the text: stack insets plus the label's own padding.
+    static let textPadding: CGFloat = 12
+    static let thumbnailSpacing: CGFloat = 8
 
     init() {
         super.init(frame: .zero)
         identifier = Self.identifier
         let label = NSTextField(labelWithString: "")
+        label.font = Self.font
         label.lineBreakMode = .byTruncatingTail
         label.cell?.truncatesLastVisibleLine = true
         label.maximumNumberOfLines = 1
@@ -53,7 +58,7 @@ private final class ClipCellView: NSTableCellView {
 
         // Hidden views are detached from the stack, so rows without a thumbnail start with text.
         let stack = NSStackView(views: [thumbnail, label])
-        stack.spacing = 8
+        stack.spacing = Self.thumbnailSpacing
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         textField = label
@@ -77,9 +82,11 @@ private final class ClipCellView: NSTableCellView {
 
 final class PanelController: NSObject {
     private static let width: CGFloat = 400
-    /// Transparent space around the glass card. Liquid Glass draws its shadow beyond its own
-    /// frame, and a window edge right at the card would cut that shadow off as a visible ring.
+    /// Transparent space around the glass cards. Liquid Glass draws its shadow beyond its own
+    /// frame, and a window edge right at a card would cut that shadow off as a visible ring.
     private static let margin: CGFloat = 32
+    private static let previewGap: CGFloat = 8
+    private static let maxPreviewHeight: CGFloat = 420
     private static let rowHeight: CGFloat = 32
     private static let maxVisibleRows = 10
     private static let searchHeight: CGFloat = 44
@@ -90,6 +97,8 @@ final class PanelController: NSObject {
     private let thumbnails: ThumbnailCache
     private let onPaste: (String) -> Void
     private let panel: ClipPanel
+    private let listCard = NSGlassEffectView()
+    private let previewCard = PreviewCard()
     private let searchField = NSTextField()
     private let trashButton = NSButton()
     private let tableView = NSTableView()
@@ -100,13 +109,19 @@ final class PanelController: NSObject {
     private var rowCount = 0
     /// Rows are read from SQLite one page at a time; only a few pages stay in memory.
     private var pages: [Int: [Clip]] = [:]
+    private var isReloading = false
+
+    /// Card frames in screen coordinates. The window is sized around them.
+    private var cardFrame = NSRect.zero
+    private var previewFrame: NSRect?
+    private var visibleFrame = NSRect.zero
 
     init(store: ClipStore, thumbnails: ThumbnailCache, onPaste: @escaping (String) -> Void) {
         self.store = store
         self.thumbnails = thumbnails
         self.onPaste = onPaste
         panel = ClipPanel(
-            contentRect: NSRect(x: 0, y: 0, width: Self.width + 2 * Self.margin, height: Self.searchHeight + 2 * Self.margin),
+            contentRect: .zero,
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: true
@@ -124,18 +139,13 @@ final class PanelController: NSObject {
         query = ""
         searchField.stringValue = ""
         updateListAppearance()
-        reload()
 
+        // The card's top-left corner goes to the mouse; reload() sizes it and keeps it on screen.
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
-        // Place the card's top-left corner at the mouse and keep the card itself on screen.
-        let size = NSSize(width: Self.width, height: panel.frame.height - 2 * Self.margin)
-        var card = NSRect(x: mouse.x, y: mouse.y - size.height, width: size.width, height: size.height)
-        if let visible = screen?.visibleFrame {
-            card.origin.x = min(max(card.minX, visible.minX), visible.maxX - card.width)
-            card.origin.y = min(max(card.minY, visible.minY), visible.maxY - card.height)
-        }
-        panel.setFrame(card.insetBy(dx: -Self.margin, dy: -Self.margin), display: false)
+        visibleFrame = screen?.visibleFrame ?? NSRect(origin: .zero, size: CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude))
+        cardFrame = NSRect(x: mouse.x, y: mouse.y, width: Self.width, height: 0)
+        reload()
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(searchField)
     }
@@ -143,10 +153,12 @@ final class PanelController: NSObject {
     func hide() {
         panel.orderOut(nil)
         thumbnails.reset()
-        // Drop cached rows; the next show reads fresh data anyway.
+        // Drop cached rows and preview text; the next show reads fresh data anyway.
         rowCount = 0
         pages = [:]
         tableView.reloadData()
+        previewFrame = nil
+        previewCard.clear()
     }
 
     // MARK: - Setup
@@ -221,46 +233,99 @@ final class PanelController: NSObject {
             emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
         ])
 
-        let glass = NSGlassEffectView()
-        glass.cornerRadius = 16
-        glass.contentView = content
-        glass.translatesAutoresizingMaskIntoConstraints = false
+        listCard.cornerRadius = 16
+        listCard.contentView = content
+
+        previewCard.isHidden = true
+        previewCard.onMouseUp = { [weak self] in self?.focusSearchField() }
 
         let container = MarginView()
         container.onMouseDown = { [weak self] in self?.hide() }
-        container.addSubview(glass)
-        NSLayoutConstraint.activate([
-            glass.topAnchor.constraint(equalTo: container.topAnchor, constant: Self.margin),
-            glass.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -Self.margin),
-            glass.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.margin),
-            glass.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Self.margin),
-        ])
+        container.addSubview(listCard)
+        container.addSubview(previewCard)
         panel.contentView = container
+    }
+
+    // MARK: - Layout
+
+    /// Sizes the window around the cards and places them inside it.
+    private func layoutWindow() {
+        let cards = previewFrame.map(cardFrame.union) ?? cardFrame
+        let frame = cards.insetBy(dx: -Self.margin, dy: -Self.margin)
+        panel.setFrame(frame, display: panel.isVisible)
+        listCard.frame = cardFrame.offsetBy(dx: -frame.minX, dy: -frame.minY)
+        if let previewFrame {
+            previewCard.frame = previewFrame.offsetBy(dx: -frame.minX, dy: -frame.minY)
+        }
+        previewCard.isHidden = previewFrame == nil
+        panel.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    /// Shows the preview card next to the list when the selected clip doesn't fit its row.
+    private func updatePreview() {
+        let row = tableView.selectedRow
+        guard let clip = clip(at: row), isTruncated(clip, row: row),
+              let loaded = logged("Load preview", { try store.excerpt(of: clip.id, limit: PreviewCard.characterLimit) }),
+              let excerpt = loaded
+        else {
+            if previewFrame != nil {
+                previewFrame = nil
+                previewCard.clear()
+                layoutWindow()
+            }
+            return
+        }
+        let height = previewCard.show(excerpt.text, length: excerpt.length, maxHeight: Self.maxPreviewHeight)
+        // Right of the list, or left when the screen has no room on the right.
+        var frame = NSRect(x: cardFrame.maxX + Self.previewGap, y: cardFrame.maxY - height,
+                           width: PreviewCard.width, height: height)
+        if frame.maxX > visibleFrame.maxX {
+            frame.origin.x = cardFrame.minX - Self.previewGap - frame.width
+        }
+        frame.origin.y = max(frame.minY, visibleFrame.minY)
+        previewFrame = frame
+        layoutWindow()
+    }
+
+    private func isTruncated(_ clip: Clip, row: Int) -> Bool {
+        if clip.isAbridged { return true }
+        var width = tableView.frameOfCell(atColumn: 0, row: row).width - ClipCellView.textPadding
+        if let link = clip.link, thumbnails.image(for: link) != nil {
+            width -= ThumbnailCache.size.width + ClipCellView.thumbnailSpacing
+        }
+        return (clip.preview as NSString).size(withAttributes: [.font: ClipCellView.font]).width > width
+    }
+
+    /// Returns focus to the search field without selecting its text, so typing continues.
+    private func focusSearchField() {
+        panel.makeFirstResponder(searchField)
+        searchField.currentEditor()?.selectedRange = NSRange(location: (searchField.stringValue as NSString).length, length: 0)
     }
 
     // MARK: - Data
 
     private func reload(selecting row: Int = 0) {
+        isReloading = true
         pages = [:]
         rowCount = logged("Count clips") { try store.count(in: list, matching: query) } ?? 0
         tableView.reloadData()
         if rowCount > 0 {
             select(min(row, rowCount - 1))
         }
+        isReloading = false
 
         emptyLabel.isHidden = rowCount > 0
         emptyLabel.stringValue = !query.isEmpty ? "没有匹配的记录" : list == .history ? "暂无记录" : "回收站为空"
 
+        // Keep the card's top edge in place and the whole card on screen.
         let visibleRows = CGFloat(min(max(rowCount, 1), Self.maxVisibleRows))
         let height = Self.searchHeight + visibleRows * (Self.rowHeight + tableView.intercellSpacing.height) + 16
-        var frame = panel.frame
-        frame.origin.y = frame.maxY - height - 2 * Self.margin
-        frame.size.height = height + 2 * Self.margin
-        // Only the glass card must stay on screen; the transparent margin may extend past it.
-        if let visible = panel.screen?.visibleFrame, frame.minY + Self.margin < visible.minY {
-            frame.origin.y = visible.minY - Self.margin
-        }
-        panel.setFrame(frame, display: panel.isVisible)
+        var card = NSRect(x: cardFrame.minX, y: cardFrame.maxY - height, width: Self.width, height: height)
+        card.origin.x = min(max(card.minX, visibleFrame.minX), visibleFrame.maxX - card.width)
+        card.origin.y = min(max(card.minY, visibleFrame.minY), visibleFrame.maxY - card.height)
+        cardFrame = card
+        layoutWindow()
+        updatePreview()
     }
 
     private func clip(at row: Int) -> Clip? {
@@ -356,7 +421,10 @@ final class PanelController: NSObject {
             if let digit = Int(key) { activate(digit - 1) }
         // The app has no main menu, so standard editing shortcuts are routed by hand.
         case "x": NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil)
-        case "c": NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
+        case "c":
+            if !previewCard.copySelection() {
+                NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
+            }
         case "v": NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil)
         case "a": NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
         case "z": NSApp.sendAction(Selector(("undo:")), to: nil, from: nil)
@@ -405,6 +473,13 @@ extension PanelController: NSTableViewDataSource, NSTableViewDelegate {
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         ClipRowView()
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        // reload() updates the preview itself once the new rows and frames are in place.
+        if !isReloading {
+            updatePreview()
+        }
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {

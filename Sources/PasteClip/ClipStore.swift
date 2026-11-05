@@ -2,11 +2,13 @@ import CryptoKit
 import Foundation
 import SQLite3
 
-/// One row as shown in the panel list. The full text is loaded only when pasting.
+/// One row as shown in the panel list. The full text is loaded only when pasting or previewing.
 struct Clip: Equatable {
     let id: Int64
     let preview: String
     let link: URL?
+    /// The one-line preview leaves out text: line breaks or anything past the preview length.
+    let isAbridged: Bool
 }
 
 enum ClipList {
@@ -130,17 +132,32 @@ final class ClipStore {
         let order = list == .history ? "used_at" : "deleted_at"
         var clips: [Clip] = []
         clips.reserveCapacity(limit)
+        // The preview is the trimmed text with whitespace runs collapsed, so any difference after
+        // trimming means line breaks or truncation.
         try run(
-            "SELECT id, preview, link FROM clips WHERE \(filter) ORDER BY \(order) DESC LIMIT ? OFFSET ?",
+            """
+            SELECT id, preview, link, trim(text, char(32, 9, 10, 13)) <> preview FROM clips
+            WHERE \(filter) ORDER BY \(order) DESC LIMIT ? OFFSET ?
+            """,
             values + [.int(Int64(limit)), .int(Int64(offset))]
         ) { statement in
             clips.append(Clip(
                 id: sqlite3_column_int64(statement, 0),
                 preview: Self.string(statement, 1) ?? "",
-                link: Self.string(statement, 2).flatMap(URL.init(string:))
+                link: Self.string(statement, 2).flatMap(URL.init(string:)),
+                isAbridged: sqlite3_column_int(statement, 3) != 0
             ))
         }
         return clips
+    }
+
+    /// Returns at most `limit` characters of the clip's text and its total length in characters.
+    func excerpt(of id: Int64, limit: Int) throws -> (text: String, length: Int)? {
+        var excerpt: (String, Int)?
+        try run("SELECT substr(text, 1, ?), length(text) FROM clips WHERE id = ?", [.int(Int64(limit)), .int(id)]) {
+            excerpt = (Self.string($0, 0) ?? "", Int(sqlite3_column_int64($0, 1)))
+        }
+        return excerpt
     }
 
     func text(of id: Int64) throws -> String? {
