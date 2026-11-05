@@ -1,0 +1,354 @@
+import AppKit
+
+/// Borderless panel that takes keyboard focus without activating the app,
+/// so the previously active app stays frontmost and receives the paste.
+private final class ClipPanel: NSPanel {
+    var keyEquivalentHandler: ((NSEvent) -> Bool)?
+
+    override var canBecomeKey: Bool { true }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        keyEquivalentHandler?(event) == true || super.performKeyEquivalent(with: event)
+    }
+}
+
+/// Keeps the selection in accent color although the search field, not the table, has focus.
+private final class ClipRowView: NSTableRowView {
+    override var isEmphasized: Bool {
+        get { true }
+        set {}
+    }
+}
+
+private final class ClipCellView: NSTableCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("ClipCell")
+
+    init() {
+        super.init(frame: .zero)
+        identifier = Self.identifier
+        let label = NSTextField(labelWithString: "")
+        label.lineBreakMode = .byTruncatingTail
+        label.cell?.truncatesLastVisibleLine = true
+        label.maximumNumberOfLines = 1
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        textField = label
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+}
+
+final class PanelController: NSObject {
+    private static let width: CGFloat = 400
+    private static let rowHeight: CGFloat = 32
+    private static let maxVisibleRows = 10
+    private static let searchHeight: CGFloat = 44
+    private static let pageSize = 50
+    private static let maxCachedPages = 6
+
+    private let store: ClipStore
+    private let onPaste: (String) -> Void
+    private let panel: ClipPanel
+    private let searchField = NSTextField()
+    private let trashButton = NSButton()
+    private let tableView = NSTableView()
+    private let emptyLabel = NSTextField(labelWithString: "")
+
+    private var list = ClipList.history
+    private var query = ""
+    private var rowCount = 0
+    /// Rows are read from SQLite one page at a time; only a few pages stay in memory.
+    private var pages: [Int: [Clip]] = [:]
+
+    init(store: ClipStore, onPaste: @escaping (String) -> Void) {
+        self.store = store
+        self.onPaste = onPaste
+        panel = ClipPanel(
+            contentRect: NSRect(x: 0, y: 0, width: Self.width, height: Self.searchHeight),
+            styleMask: [.nonactivatingPanel, .borderless],
+            backing: .buffered,
+            defer: true
+        )
+        super.init()
+        configurePanel()
+    }
+
+    var isVisible: Bool { panel.isVisible }
+
+    func show() {
+        logged("Purge trash") { try store.purgeExpiredTrash() }
+        list = .history
+        query = ""
+        searchField.stringValue = ""
+        updateListAppearance()
+        reload()
+
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
+        var frame = NSRect(x: mouse.x, y: mouse.y - panel.frame.height, width: Self.width, height: panel.frame.height)
+        if let visible = screen?.visibleFrame {
+            frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+            frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+        }
+        panel.setFrame(frame, display: false)
+        panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(searchField)
+    }
+
+    func hide() {
+        panel.orderOut(nil)
+        // Drop cached rows; the next show reads fresh data anyway.
+        rowCount = 0
+        pages = [:]
+        tableView.reloadData()
+    }
+
+    // MARK: - Setup
+
+    private func configurePanel() {
+        panel.isFloatingPanel = true
+        panel.level = .popUpMenu
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.delegate = self
+        panel.keyEquivalentHandler = { [weak self] event in self?.handleKeyEquivalent(event) ?? false }
+
+        searchField.isBordered = false
+        searchField.drawsBackground = false
+        searchField.focusRingType = .none
+        searchField.font = .systemFont(ofSize: 16)
+        searchField.cell?.isScrollable = true
+        searchField.cell?.wraps = false
+        searchField.delegate = self
+
+        trashButton.isBordered = false
+        trashButton.refusesFirstResponder = true
+        trashButton.imagePosition = .imageOnly
+        trashButton.target = self
+        trashButton.action = #selector(toggleList)
+        trashButton.toolTip = "回收站（⌘T）"
+
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("clip"))
+        tableView.addTableColumn(column)
+        tableView.headerView = nil
+        tableView.style = .inset
+        tableView.rowHeight = Self.rowHeight
+        tableView.backgroundColor = .clear
+        tableView.refusesFirstResponder = true
+        tableView.dataSource = self
+        tableView.delegate = self
+        tableView.target = self
+        tableView.action = #selector(rowClicked)
+
+        let scrollView = NSScrollView()
+        scrollView.documentView = tableView
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+
+        emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.alignment = .center
+
+        let content = NSView()
+        for view in [searchField, trashButton, scrollView, emptyLabel] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            searchField.trailingAnchor.constraint(equalTo: trashButton.leadingAnchor, constant: -8),
+            searchField.centerYAnchor.constraint(equalTo: content.topAnchor, constant: Self.searchHeight / 2),
+            trashButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            trashButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            trashButton.widthAnchor.constraint(equalToConstant: 20),
+            scrollView.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.searchHeight),
+            scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -6),
+            emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+        ])
+
+        let glass = NSGlassEffectView()
+        glass.cornerRadius = 16
+        glass.contentView = content
+        panel.contentView = glass
+    }
+
+    // MARK: - Data
+
+    private func reload(selecting row: Int = 0) {
+        pages = [:]
+        rowCount = logged("Count clips") { try store.count(in: list, matching: query) } ?? 0
+        tableView.reloadData()
+        if rowCount > 0 {
+            select(min(row, rowCount - 1))
+        }
+
+        emptyLabel.isHidden = rowCount > 0
+        emptyLabel.stringValue = !query.isEmpty ? "没有匹配的记录" : list == .history ? "暂无记录" : "回收站为空"
+
+        let visibleRows = CGFloat(min(max(rowCount, 1), Self.maxVisibleRows))
+        let height = Self.searchHeight + visibleRows * (Self.rowHeight + tableView.intercellSpacing.height) + 16
+        var frame = panel.frame
+        frame.origin.y = frame.maxY - height
+        frame.size.height = height
+        if let visible = panel.screen?.visibleFrame, frame.minY < visible.minY {
+            frame.origin.y = visible.minY
+        }
+        panel.setFrame(frame, display: panel.isVisible)
+    }
+
+    private func clip(at row: Int) -> Clip? {
+        guard row >= 0, row < rowCount else { return nil }
+        let page = row / Self.pageSize
+        let clips: [Clip]
+        if let cached = pages[page] {
+            clips = cached
+        } else {
+            let offset = page * Self.pageSize
+            clips = logged("Load clips") {
+                try store.clips(in: list, matching: query, offset: offset, limit: Self.pageSize)
+            } ?? []
+            if pages.count >= Self.maxCachedPages,
+               let farthest = pages.keys.max(by: { abs($0 - page) < abs($1 - page) }) {
+                pages[farthest] = nil
+            }
+            pages[page] = clips
+        }
+        let index = row % Self.pageSize
+        return index < clips.count ? clips[index] : nil
+    }
+
+    private func updateListAppearance() {
+        let inTrash = list == .trash
+        trashButton.image = NSImage(systemSymbolName: inTrash ? "trash.fill" : "trash", accessibilityDescription: "回收站")
+        trashButton.contentTintColor = inTrash ? .controlAccentColor : .secondaryLabelColor
+        searchField.placeholderString = inTrash ? "搜索回收站" : "搜索"
+    }
+
+    // MARK: - Actions
+
+    private func select(_ row: Int) {
+        guard rowCount > 0 else { return }
+        let row = min(max(row, 0), rowCount - 1)
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        tableView.scrollRowToVisible(row)
+    }
+
+    /// History: paste the clip. Trash: restore it to the history.
+    private func activate(_ row: Int) {
+        guard let clip = clip(at: row) else { return }
+        switch list {
+        case .history:
+            guard let loaded = logged("Load clip text", { try store.text(of: clip.id) }), let text = loaded else { return }
+            hide()
+            onPaste(text)
+        case .trash:
+            logged("Restore clip") { try store.restore(clip.id) }
+            reload(selecting: row)
+        }
+    }
+
+    /// History: move the clip to the trash. Trash: delete it permanently.
+    private func deleteSelected() {
+        let row = tableView.selectedRow
+        guard let clip = clip(at: row) else { return }
+        switch list {
+        case .history: logged("Move clip to trash") { try store.moveToTrash(clip.id) }
+        case .trash: logged("Delete clip") { try store.deletePermanently(clip.id) }
+        }
+        reload(selecting: row)
+    }
+
+    @objc private func toggleList() {
+        list = list == .history ? .trash : .history
+        updateListAppearance()
+        reload()
+    }
+
+    @objc private func rowClicked() {
+        activate(tableView.clickedRow)
+    }
+
+    private func handleKeyEquivalent(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard modifiers == .command else { return false }
+        if event.keyCode == 51 { // Delete (backspace)
+            deleteSelected()
+            return true
+        }
+        switch event.charactersIgnoringModifiers {
+        case "t":
+            toggleList()
+        case let key? where list == .history && key.count == 1 && ("1"..."9").contains(key):
+            if let digit = Int(key) { activate(digit - 1) }
+        // The app has no main menu, so standard editing shortcuts are routed by hand.
+        case "x": NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil)
+        case "c": NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
+        case "v": NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil)
+        case "a": NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+        case "z": NSApp.sendAction(Selector(("undo:")), to: nil, from: nil)
+        default:
+            return false
+        }
+        return true
+    }
+}
+
+// MARK: - NSWindowDelegate
+
+extension PanelController: NSWindowDelegate {
+    func windowDidResignKey(_ notification: Notification) {
+        hide()
+    }
+}
+
+// MARK: - NSTextFieldDelegate
+
+extension PanelController: NSTextFieldDelegate {
+    func controlTextDidChange(_ notification: Notification) {
+        query = searchField.stringValue
+        reload()
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.moveUp(_:)): select(tableView.selectedRow - 1)
+        case #selector(NSResponder.moveDown(_:)): select(tableView.selectedRow + 1)
+        case #selector(NSResponder.insertNewline(_:)): activate(tableView.selectedRow)
+        case #selector(NSResponder.cancelOperation(_:)): hide()
+        case #selector(NSResponder.deleteBackward(_:)) where searchField.stringValue.isEmpty: deleteSelected()
+        default: return false
+        }
+        return true
+    }
+}
+
+// MARK: - NSTableViewDataSource, NSTableViewDelegate
+
+extension PanelController: NSTableViewDataSource, NSTableViewDelegate {
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        rowCount
+    }
+
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        ClipRowView()
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let cell = tableView.makeView(withIdentifier: ClipCellView.identifier, owner: nil) as? ClipCellView ?? ClipCellView()
+        cell.textField?.stringValue = clip(at: row)?.preview ?? ""
+        return cell
+    }
+}
