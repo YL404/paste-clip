@@ -12,6 +12,15 @@ private final class ClipPanel: NSPanel {
     }
 }
 
+/// Transparent area around the glass card. A click there counts as a click outside the panel.
+private final class MarginView: NSView {
+    var onMouseDown: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        onMouseDown?()
+    }
+}
+
 /// Keeps the selection in accent color although the search field, not the table, has focus.
 private final class ClipRowView: NSTableRowView {
     override var isEmphasized: Bool {
@@ -68,6 +77,9 @@ private final class ClipCellView: NSTableCellView {
 
 final class PanelController: NSObject {
     private static let width: CGFloat = 400
+    /// Transparent space around the glass card. Liquid Glass draws its shadow beyond its own
+    /// frame, and a window edge right at the card would cut that shadow off as a visible ring.
+    private static let margin: CGFloat = 32
     private static let rowHeight: CGFloat = 32
     private static let maxVisibleRows = 10
     private static let searchHeight: CGFloat = 44
@@ -94,7 +106,7 @@ final class PanelController: NSObject {
         self.thumbnails = thumbnails
         self.onPaste = onPaste
         panel = ClipPanel(
-            contentRect: NSRect(x: 0, y: 0, width: Self.width, height: Self.searchHeight),
+            contentRect: NSRect(x: 0, y: 0, width: Self.width + 2 * Self.margin, height: Self.searchHeight + 2 * Self.margin),
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: true
@@ -116,12 +128,14 @@ final class PanelController: NSObject {
 
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
-        var frame = NSRect(x: mouse.x, y: mouse.y - panel.frame.height, width: Self.width, height: panel.frame.height)
+        // Place the card's top-left corner at the mouse and keep the card itself on screen.
+        let size = NSSize(width: Self.width, height: panel.frame.height - 2 * Self.margin)
+        var card = NSRect(x: mouse.x, y: mouse.y - size.height, width: size.width, height: size.height)
         if let visible = screen?.visibleFrame {
-            frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
-            frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+            card.origin.x = min(max(card.minX, visible.minX), visible.maxX - card.width)
+            card.origin.y = min(max(card.minY, visible.minY), visible.maxY - card.height)
         }
-        panel.setFrame(frame, display: false)
+        panel.setFrame(card.insetBy(dx: -Self.margin, dy: -Self.margin), display: false)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(searchField)
     }
@@ -145,7 +159,9 @@ final class PanelController: NSObject {
         panel.isReleasedWhenClosed = false
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        panel.hasShadow = true
+        // The glass draws its own shadow. A window shadow on top of it outlines the rectangular
+        // window and is not recomputed when the panel resizes.
+        panel.hasShadow = false
         panel.delegate = self
         panel.keyEquivalentHandler = { [weak self] event in self?.handleKeyEquivalent(event) ?? false }
 
@@ -208,7 +224,18 @@ final class PanelController: NSObject {
         let glass = NSGlassEffectView()
         glass.cornerRadius = 16
         glass.contentView = content
-        panel.contentView = glass
+        glass.translatesAutoresizingMaskIntoConstraints = false
+
+        let container = MarginView()
+        container.onMouseDown = { [weak self] in self?.hide() }
+        container.addSubview(glass)
+        NSLayoutConstraint.activate([
+            glass.topAnchor.constraint(equalTo: container.topAnchor, constant: Self.margin),
+            glass.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -Self.margin),
+            glass.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.margin),
+            glass.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Self.margin),
+        ])
+        panel.contentView = container
     }
 
     // MARK: - Data
@@ -227,10 +254,11 @@ final class PanelController: NSObject {
         let visibleRows = CGFloat(min(max(rowCount, 1), Self.maxVisibleRows))
         let height = Self.searchHeight + visibleRows * (Self.rowHeight + tableView.intercellSpacing.height) + 16
         var frame = panel.frame
-        frame.origin.y = frame.maxY - height
-        frame.size.height = height
-        if let visible = panel.screen?.visibleFrame, frame.minY < visible.minY {
-            frame.origin.y = visible.minY
+        frame.origin.y = frame.maxY - height - 2 * Self.margin
+        frame.size.height = height + 2 * Self.margin
+        // Only the glass card must stay on screen; the transparent margin may extend past it.
+        if let visible = panel.screen?.visibleFrame, frame.minY + Self.margin < visible.minY {
+            frame.origin.y = visible.minY - Self.margin
         }
         panel.setFrame(frame, display: panel.isVisible)
     }
