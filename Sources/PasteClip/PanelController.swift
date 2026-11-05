@@ -35,10 +35,21 @@ private final class ClipCellView: NSTableCellView {
     /// Horizontal space the cell uses around the text: stack insets plus the label's own padding.
     static let textPadding: CGFloat = 12
     static let thumbnailSpacing: CGFloat = 8
+    /// Width of the ⌘1–⌘9 hint column. Digits are monospaced, so any digit measures the same;
+    /// the extra 4 points cover the label's own padding.
+    static let indexFont = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+    static let indexWidth = ("⌘8" as NSString).size(withAttributes: [.font: indexFont]).width.rounded(.up) + 4
+
+    private let indexLabel = NSTextField(labelWithString: "")
 
     init() {
         super.init(frame: .zero)
         identifier = Self.identifier
+        indexLabel.font = Self.indexFont
+        indexLabel.textColor = .secondaryLabelColor
+        indexLabel.alignment = .right
+        indexLabel.widthAnchor.constraint(equalToConstant: Self.indexWidth).isActive = true
+
         let label = NSTextField(labelWithString: "")
         label.font = Self.font
         label.lineBreakMode = .byTruncatingTail
@@ -57,7 +68,7 @@ private final class ClipCellView: NSTableCellView {
         ])
 
         // Hidden views are detached from the stack, so rows without a thumbnail start with text.
-        let stack = NSStackView(views: [thumbnail, label])
+        let stack = NSStackView(views: [indexLabel, thumbnail, label])
         stack.spacing = Self.thumbnailSpacing
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
@@ -70,10 +81,18 @@ private final class ClipCellView: NSTableCellView {
         ])
     }
 
-    func configure(text: String, thumbnail: NSImage?) {
+    /// `index` nil hides the hint column; an empty string keeps it so text stays aligned.
+    func configure(index: String?, text: String, thumbnail: NSImage?) {
+        indexLabel.stringValue = index ?? ""
+        indexLabel.isHidden = index == nil
         textField?.stringValue = text
         imageView?.image = thumbnail
         imageView?.isHidden = thumbnail == nil
+    }
+
+    /// The hint sits inside the stack view, so pass the selection style to it explicitly.
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { indexLabel.cell?.backgroundStyle = backgroundStyle }
     }
 
     @available(*, unavailable)
@@ -293,6 +312,9 @@ final class PanelController: NSObject {
         if let link = clip.link, thumbnails.image(for: link) != nil {
             width -= ThumbnailCache.size.width + ClipCellView.thumbnailSpacing
         }
+        if list == .history {
+            width -= ClipCellView.indexWidth + ClipCellView.thumbnailSpacing
+        }
         return (clip.preview as NSString).size(withAttributes: [.font: ClipCellView.font]).width > width
     }
 
@@ -485,7 +507,9 @@ extension PanelController: NSTableViewDataSource, NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let cell = tableView.makeView(withIdentifier: ClipCellView.identifier, owner: nil) as? ClipCellView ?? ClipCellView()
         let clip = clip(at: row)
-        cell.configure(text: clip?.preview ?? "", thumbnail: clip?.link.flatMap(thumbnails.image(for:)))
+        // The hints mirror ⌘1–⌘9, which only work in the history.
+        let index = list == .history ? (row < 9 ? "⌘\(row + 1)" : "") : nil
+        cell.configure(index: index, text: clip?.preview ?? "", thumbnail: clip?.link.flatMap(thumbnails.image(for:)))
         return cell
     }
 }
