@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var monitor: PasteboardMonitor?
     private var panel: PanelController?
     private var hotKey: HotKey?
+    private var settings: SettingsWindowController?
 
     static func main() {
         let app = NSApplication.shared
@@ -45,7 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             log.error("Failed to register the global shortcut")
         }
         self.hotKey = hotKey
-
+        settings = SettingsWindowController(hotKey: hotKey)
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         let menu = NSMenu()
         menu.delegate = self
@@ -78,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(withTitle: "打开剪贴板历史（\(Shortcut.load().displayString)）",
                      action: #selector(togglePanel), keyEquivalent: "")
         menu.addItem(withTitle: "清空回收站…", action: #selector(emptyTrash), keyEquivalent: "")
+        menu.addItem(withTitle: "设置…", action: #selector(showSettings), keyEquivalent: ",")
         menu.addItem(.separator())
         menu.addItem(withTitle: "退出 PasteClip", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
     }
@@ -96,6 +98,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openAccessibilitySettings() {
         Paster.openAccessibilitySettings()
+    }
+
+    @objc private func showSettings() {
+        settings?.show()
     }
 
     @objc private func emptyTrash() {

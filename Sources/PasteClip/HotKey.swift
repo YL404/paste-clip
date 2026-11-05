@@ -55,14 +55,18 @@ final class HotKey {
     /// Replaces the current hot key. Returns false when the system rejects the combination,
     /// for example because another app already registered it.
     func register(_ shortcut: Shortcut) -> Bool {
-        if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-            self.hotKeyRef = nil
-        }
+        unregister()
         let id = EventHotKeyID(signature: OSType(0x5043_4C50), id: 1) // "PCLP"
         var ref: EventHotKeyRef?
         let status = RegisterEventHotKey(shortcut.keyCode, shortcut.modifiers, id, GetApplicationEventTarget(), 0, &ref)
         hotKeyRef = ref
         return status == noErr
+    }
+
+    func unregister() {
+        if let hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+            self.hotKeyRef = nil
+        }
     }
 }
