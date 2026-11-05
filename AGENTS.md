@@ -1,0 +1,74 @@
+# AGENTS.md — paste-clip
+
+## 项目
+
+paste-clip 是一个极简的 macOS 剪贴板历史 app，作者自用，在 GitHub 开源。
+
+- 最低系统：macOS 26。不写旧系统兼容代码，不加 `#available` 回退分支。
+- 性能目标：常驻内存尽量低。其他指标不单独优化，但不能因此退化。
+- 第一版范围：
+  - 只记录纯文本。
+  - 选中一条历史后，直接粘贴到当前前台 app。
+  - 文本是网页链接时显示缩略图；YouTube 链接显示视频封面。
+- 第一版不做：富文本、图片、文件、收藏/置顶、忽略 app 列表、同步。新增功能先和用户确认。
+
+## 技术约定
+
+- Swift 6 语言模式，开启完整的严格并发检查。
+- UI 用 AppKit（`NSPanel`、`NSTableView`）。设置窗口等非性能敏感界面可以用 SwiftUI。
+- 存储用系统自带的 SQLite C API。引入任何第三方依赖前，先说明系统 API 为什么不够用，并征得用户同意。
+- 剪贴板监听：轮询 `NSPasteboard.general.changeCount`，只在值变化时读取内容。
+- 剪贴板隐私：
+  - 跳过带有 `org.nspasteboard.ConcealedType` 或 `org.nspasteboard.TransientType` 的条目（密码管理器常用这两种类型标记）。
+  - 处理 macOS 剪贴板访问授权（`NSPasteboard.accessBehavior`），在未授权时给出明确提示，不静默失败。
+  - 日志里不输出剪贴板内容。
+- 粘贴：写回剪贴板后用 `CGEvent` 模拟 ⌘V，依赖辅助功能权限；未授权时引导用户开启。
+- 链接缩略图：
+  - YouTube 封面直接按视频 ID 拼接封面图地址，不抓取网页。
+  - 缩略图缩放到显示尺寸后缓存到磁盘，界面按需加载，不在内存中长期持有原图。
+  - 网络请求必须可取消，失败时静默降级为无缩略图。
+
+## 代码质量
+
+- 先确认系统框架或现有代码里是否已有实现，再写新代码。
+- 不写为“以后”准备的抽象、配置项或空壳模块。
+- 不用强制解包和 `try!`，除非能证明该处不会失败，并在旁边注释原因。
+- UI 相关类型标注 `@MainActor`；跨隔离域传递的类型要满足 `Sendable`，不用 `@unchecked Sendable` 绕过检查。
+- URL 识别、存储读写等纯逻辑与 AppKit 解耦，便于单独测试。
+- 改动涉及常驻路径（监听、存储、面板、缩略图缓存）时，用 `footprint` 或 Instruments 对比改动前后的内存数据，并在回复中给出数字。
+
+## 验证与验收
+
+- 优先用命令行方式验证：`xcodebuild` 构建、单元测试。
+- 需要运行 app 时，用 `open -g` 在后台启动，不抢占前台焦点。
+- 需要模拟器时，用 `xcrun simctl` 无头启动，不打开 Simulator.app 前台窗口。
+- 必须前台交互才能验收的功能（如全局快捷键、粘贴到前台 app），不自行抢占前台，列出操作步骤和预期结果交给用户手动验收。
+
+## Skills
+
+`.agents/skills/` 下是指向本机 Swift skill 的软链接：
+
+- `swift-concurrency`：处理 actor、`Sendable`、`@MainActor` 和并发相关编译警告时使用。
+- `swift-practical-patterns`：做具体实现决策时使用，包括 AppKit 嵌入、构建耗时等。
+- `swiftui-expert-skill`、`swiftui-pro`：只在编写或审查 SwiftUI 代码时使用。
+
+## Git 工作流
+
+- 默认直接在本地 `main` 上开发。
+- 只有以下情况才新建分支或 worktree，并先告知用户：
+  - 同时进行多个会互相冲突的任务。
+  - 高风险的实验性改动，可能需要整体丢弃。
+  - 需要在改动进行中保持 `main` 随时可构建、可用。
+- 合并回 `main` 后删除对应分支和 worktree。
+
+## 提交规范
+
+- 提交信息用英文，遵循 Conventional Commits：`<type>(<scope>): <subject>`。
+  - type：`feat`、`fix`、`perf`、`refactor`、`test`、`docs`、`build`、`chore`。
+  - scope 可选，用模块名，如 `pasteboard`、`store`、`panel`、`thumbnail`。
+  - subject 用祈使句，小写开头，不加句号，不超过 72 个字符。
+  - 需要说明原因或取舍时写正文，空一行后书写。
+- 一个提交只做一件事。每个提交都应能通过构建。
+- 完成一个已验证的改动后提交；提交前用 `git diff --staged` 核对暂存范围，按文件名暂存，不用 `git add -A`。
+- 不提交构建产物、`.DS_Store`、证书、签名配置等本机文件。
+- 未经用户要求，不 push、不 force push、不改写已推送的历史、不跳过 hooks。
