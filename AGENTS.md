@@ -59,7 +59,8 @@ paste-clip 是一个极简的 macOS 剪贴板历史 app，作者自用，在 Git
 
 ## 验证与验收
 
-- 优先用命令行方式验证：`xcodebuild` 构建、单元测试。
+- 构建并打包：`scripts/bundle.sh`（默认 release，传 `debug` 构建调试版），产物为 `build/PasteClip.app`，自动使用本机 Apple Development 证书签名。签名稳定，重新构建后辅助功能授权不会失效。
+- 优先用命令行方式验证：`swift build`、单元测试。
 - 需要运行 app 时，用 `open -g` 在后台启动，不抢占前台焦点。
 - 需要模拟器时，用 `xcrun simctl` 无头启动，不打开 Simulator.app 前台窗口。
 - 必须前台交互才能验收的功能（如全局快捷键、粘贴到前台 app），不自行抢占前台，列出操作步骤和预期结果交给用户手动验收。
