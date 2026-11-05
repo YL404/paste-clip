@@ -1,13 +1,15 @@
 import AppKit
 import Carbon.HIToolbox
+import ServiceManagement
 
-/// Settings window with a shortcut recorder. The window is created on demand
-/// and released when closed, so it costs no memory while unused.
+/// Settings window with a shortcut recorder and the launch-at-login switch. The window is
+/// created on demand and released when closed, so it costs no memory while unused.
 final class SettingsWindowController: NSObject {
     private let hotKey: HotKey
     private var window: NSWindow?
     private var recordButton: NSButton?
     private var messageLabel: NSTextField?
+    private var launchAtLoginCheckbox: NSButton?
     private var keyMonitor: Any?
 
     init(hotKey: HotKey) {
@@ -17,6 +19,8 @@ final class SettingsWindowController: NSObject {
     func show() {
         let window = window ?? makeWindow()
         self.window = window
+        // The user may have changed login items in System Settings meanwhile.
+        launchAtLoginCheckbox?.state = SMAppService.mainApp.status == .enabled ? .on : .off
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
     }
@@ -28,15 +32,16 @@ final class SettingsWindowController: NSObject {
         let message = NSTextField(labelWithString: "")
         message.textColor = .secondaryLabelColor
         message.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let checkbox = NSButton(checkboxWithTitle: "开机时自动启动", target: self, action: #selector(toggleLaunchAtLogin))
 
         let row = NSStackView(views: [label, button])
-        let stack = NSStackView(views: [row, message])
+        let stack = NSStackView(views: [row, message, checkbox])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 100),
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 130),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: true
@@ -48,7 +53,27 @@ final class SettingsWindowController: NSObject {
         window.center()
         recordButton = button
         messageLabel = message
+        launchAtLoginCheckbox = checkbox
         return window
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        let service = SMAppService.mainApp
+        do {
+            if launchAtLoginCheckbox?.state == .on {
+                try service.register()
+            } else {
+                try service.unregister()
+            }
+            messageLabel?.stringValue = ""
+        } catch {
+            messageLabel?.stringValue = "无法修改开机启动：\(error.localizedDescription)"
+        }
+        if service.status == .requiresApproval {
+            messageLabel?.stringValue = "请在系统设置的“登录项”中允许 PasteClip"
+            SMAppService.openSystemSettingsLoginItems()
+        }
+        launchAtLoginCheckbox?.state = service.status == .enabled ? .on : .off
     }
 
     @objc private func startRecording() {
@@ -129,5 +154,6 @@ extension SettingsWindowController: NSWindowDelegate {
         window = nil
         recordButton = nil
         messageLabel = nil
+        launchAtLoginCheckbox = nil
     }
 }
