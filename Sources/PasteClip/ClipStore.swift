@@ -68,7 +68,8 @@ final class ClipStore {
     // MARK: - Writes
 
     /// Adds `text` to the top of the history. Text already in the history moves to the top instead.
-    func record(_ text: String) throws {
+    /// `usedAt` lets imports keep their original order; an existing clip never moves back in time.
+    func record(_ text: String, usedAt: Date = Date()) throws {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let preview = trimmed.prefix(Self.previewLength * 4)
@@ -77,10 +78,10 @@ final class ClipStore {
             .prefix(Self.previewLength)
         try run("""
             INSERT INTO clips (text, hash, preview, link, used_at) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT (hash) WHERE deleted_at IS NULL DO UPDATE SET used_at = excluded.used_at
+            ON CONFLICT (hash) WHERE deleted_at IS NULL DO UPDATE SET used_at = max(used_at, excluded.used_at)
             """,
             .text(text), .blob(Data(SHA256.hash(data: Data(text.utf8)))), .text(String(preview)),
-            Link.webURL(in: trimmed).map { .text($0.absoluteString) } ?? .null, .real(now()))
+            Link.webURL(in: trimmed).map { .text($0.absoluteString) } ?? .null, .real(usedAt.timeIntervalSince1970))
     }
 
     func moveToTrash(_ id: Int64) throws {
