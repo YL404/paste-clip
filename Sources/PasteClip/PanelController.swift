@@ -30,14 +30,36 @@ private final class ClipCellView: NSTableCellView {
         label.lineBreakMode = .byTruncatingTail
         label.cell?.truncatesLastVisibleLine = true
         label.maximumNumberOfLines = 1
-        label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(label)
-        textField = label
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let thumbnail = NSImageView()
+        thumbnail.imageScaling = .scaleAxesIndependently
+        thumbnail.wantsLayer = true
+        thumbnail.layer?.cornerRadius = 4
+        thumbnail.layer?.masksToBounds = true
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            thumbnail.widthAnchor.constraint(equalToConstant: ThumbnailCache.size.width),
+            thumbnail.heightAnchor.constraint(equalToConstant: ThumbnailCache.size.height),
         ])
+
+        // Hidden views are detached from the stack, so rows without a thumbnail start with text.
+        let stack = NSStackView(views: [thumbnail, label])
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        textField = label
+        imageView = thumbnail
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    func configure(text: String, thumbnail: NSImage?) {
+        textField?.stringValue = text
+        imageView?.image = thumbnail
+        imageView?.isHidden = thumbnail == nil
     }
 
     @available(*, unavailable)
@@ -53,6 +75,7 @@ final class PanelController: NSObject {
     private static let maxCachedPages = 6
 
     private let store: ClipStore
+    private let thumbnails: ThumbnailCache
     private let onPaste: (String) -> Void
     private let panel: ClipPanel
     private let searchField = NSTextField()
@@ -66,8 +89,9 @@ final class PanelController: NSObject {
     /// Rows are read from SQLite one page at a time; only a few pages stay in memory.
     private var pages: [Int: [Clip]] = [:]
 
-    init(store: ClipStore, onPaste: @escaping (String) -> Void) {
+    init(store: ClipStore, thumbnails: ThumbnailCache, onPaste: @escaping (String) -> Void) {
         self.store = store
+        self.thumbnails = thumbnails
         self.onPaste = onPaste
         panel = ClipPanel(
             contentRect: NSRect(x: 0, y: 0, width: Self.width, height: Self.searchHeight),
@@ -77,6 +101,7 @@ final class PanelController: NSObject {
         )
         super.init()
         configurePanel()
+        thumbnails.onLoad = { [weak self] link in self?.reloadRows(showing: link) }
     }
 
     var isVisible: Bool { panel.isVisible }
@@ -103,6 +128,7 @@ final class PanelController: NSObject {
 
     func hide() {
         panel.orderOut(nil)
+        thumbnails.reset()
         // Drop cached rows; the next show reads fresh data anyway.
         rowCount = 0
         pages = [:]
@@ -230,6 +256,13 @@ final class PanelController: NSObject {
         return index < clips.count ? clips[index] : nil
     }
 
+    private func reloadRows(showing link: URL) {
+        guard panel.isVisible else { return }
+        let visible = tableView.rows(in: tableView.visibleRect)
+        let rows = IndexSet((visible.lowerBound..<visible.upperBound).filter { clip(at: $0)?.link == link })
+        tableView.reloadData(forRowIndexes: rows, columnIndexes: IndexSet(integer: 0))
+    }
+
     private func updateListAppearance() {
         let inTrash = list == .trash
         trashButton.image = NSImage(systemSymbolName: inTrash ? "trash.fill" : "trash", accessibilityDescription: "回收站")
@@ -348,7 +381,8 @@ extension PanelController: NSTableViewDataSource, NSTableViewDelegate {
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let cell = tableView.makeView(withIdentifier: ClipCellView.identifier, owner: nil) as? ClipCellView ?? ClipCellView()
-        cell.textField?.stringValue = clip(at: row)?.preview ?? ""
+        let clip = clip(at: row)
+        cell.configure(text: clip?.preview ?? "", thumbnail: clip?.link.flatMap(thumbnails.image(for:)))
         return cell
     }
 }

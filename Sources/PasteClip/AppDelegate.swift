@@ -19,8 +19,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let store: ClipStore
+        let thumbnails: ThumbnailCache
         do {
             store = try ClipStore(url: Self.databaseURL())
+            thumbnails = try ThumbnailCache()
         } catch {
             NSApp.activate()
             NSAlert(error: error).runModal()
@@ -36,7 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monitor.start()
         self.monitor = monitor
 
-        panel = PanelController(store: store) { [weak self] text in
+        panel = PanelController(store: store, thumbnails: thumbnails) { [weak self] text in
             Paster.paste(text)
             self?.updateStatusIcon()
         }
