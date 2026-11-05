@@ -202,7 +202,7 @@ final class PanelController: NSObject {
         tableView.dataSource = self
         tableView.delegate = self
         tableView.target = self
-        tableView.action = #selector(rowClicked)
+        tableView.doubleAction = #selector(rowDoubleClicked)
 
         let scrollView = NSScrollView()
         scrollView.documentView = tableView
@@ -403,7 +403,7 @@ final class PanelController: NSObject {
         reload()
     }
 
-    @objc private func rowClicked() {
+    @objc private func rowDoubleClicked() {
         activate(tableView.clickedRow)
     }
 
