@@ -188,6 +188,7 @@ final class PanelController: NSObject {
     private static let listHeightKey = "PanelListHeight"
     private static let searchHeight: CGFloat = 44
     private static let footerHeight: CGFloat = 26
+    private static let bannerHeight: CGFloat = 30
     /// Space the inset table style adds above and below the rows.
     private static let tableInsets: CGFloat = 10
     private static let pageSize = 50
@@ -205,6 +206,11 @@ final class PanelController: NSObject {
     private let emptyLabel = NSTextField(labelWithString: "")
     private let hintLabel = NSTextField(labelWithString: "")
     private let resizeHandle = ResizeHandle()
+    /// Missing permission notice under the search field.
+    private let banner = NSStackView()
+    private let bannerLabel = NSTextField(labelWithString: "")
+    private var bannerAction: (() -> Void)?
+    private var listTopConstraint: NSLayoutConstraint?
 
     private var list = ClipList.history
     private var query = ""
@@ -251,6 +257,7 @@ final class PanelController: NSObject {
         showsShortcutHints = false
         commandWasDown = NSEvent.modifierFlags.contains(.command)
         updateListAppearance()
+        updateBanner()
 
         // The card's top-left corner goes to the mouse; reload() sizes it and keeps it on screen.
         let mouse = NSEvent.mouseLocation
@@ -335,11 +342,29 @@ final class PanelController: NSObject {
         resizeHandle.onDrag = { [weak self] mouse in self?.resizeList(bottom: mouse.y) }
         resizeHandle.onDragEnd = { [weak self] in self?.finishResizing() }
 
+        let bannerIcon = NSImageView(image: NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil) ?? NSImage())
+        bannerIcon.contentTintColor = .systemYellow
+        bannerLabel.font = .systemFont(ofSize: 12)
+        bannerLabel.lineBreakMode = .byTruncatingTail
+        bannerLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The message stretches, so the button sits at the trailing edge.
+        bannerLabel.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
+        let bannerButton = NSButton(title: "打开设置", target: self, action: #selector(bannerButtonClicked))
+        bannerButton.controlSize = .small
+        bannerButton.refusesFirstResponder = true
+        for view in [bannerIcon, bannerLabel, bannerButton] {
+            banner.addArrangedSubview(view)
+        }
+        banner.spacing = 6
+        banner.isHidden = true
+
         let content = NSView()
-        for view in [searchField, trashButton, scrollView, emptyLabel, resizeHandle] as [NSView] {
+        for view in [searchField, trashButton, banner, scrollView, emptyLabel, resizeHandle] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
+        let listTop = scrollView.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.searchHeight)
+        listTopConstraint = listTop
         NSLayoutConstraint.activate([
             searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             searchField.trailingAnchor.constraint(equalTo: trashButton.leadingAnchor, constant: -8),
@@ -347,7 +372,11 @@ final class PanelController: NSObject {
             trashButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
             trashButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             trashButton.widthAnchor.constraint(equalToConstant: 20),
-            scrollView.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.searchHeight),
+            banner.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.searchHeight),
+            banner.heightAnchor.constraint(equalToConstant: Self.bannerHeight),
+            banner.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            banner.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            listTop,
             scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -Self.footerHeight),
@@ -500,7 +529,9 @@ final class PanelController: NSObject {
 
     private var rowStride: CGFloat { Self.rowHeight + tableView.intercellSpacing.height }
     /// Card height outside the row area.
-    private var chromeHeight: CGFloat { Self.searchHeight + Self.footerHeight }
+    private var chromeHeight: CGFloat {
+        Self.searchHeight + (banner.isHidden ? 0 : Self.bannerHeight) + Self.footerHeight
+    }
 
     private func listHeight(rows: Int) -> CGFloat {
         CGFloat(rows) * rowStride + Self.tableInsets
@@ -575,6 +606,26 @@ final class PanelController: NSObject {
 
     // MARK: - Actions
 
+    /// Shows the most important missing permission, checked each time the panel opens.
+    private func updateBanner() {
+        if PasteboardMonitor.isAccessDenied {
+            bannerLabel.stringValue = "无法读取剪贴板，新复制的内容不会被记录"
+            bannerAction = PasteboardMonitor.openPrivacySettings
+        } else if !Paster.isTrusted {
+            bannerLabel.stringValue = "未开启辅助功能权限，无法自动粘贴"
+            bannerAction = Paster.openAccessibilitySettings
+        } else {
+            bannerAction = nil
+        }
+        banner.isHidden = bannerAction == nil
+        listTopConstraint?.constant = Self.searchHeight + (banner.isHidden ? 0 : Self.bannerHeight)
+    }
+
+    @objc private func bannerButtonClicked() {
+        let action = bannerAction
+        hide()
+        action?()
+    }
     private func select(_ row: Int) {
         guard rowCount > 0 else { return }
         let row = min(max(row, 0), rowCount - 1)

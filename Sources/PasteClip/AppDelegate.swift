@@ -67,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         updateStatusIcon()
         menu.removeAllItems()
-        if Self.pasteboardAccessDenied {
+        if PasteboardMonitor.isAccessDenied {
             menu.addItem(withTitle: "无法读取剪贴板：请在“隐私与安全性”中允许 PasteClip 访问…",
                          action: #selector(openPrivacySettings), keyEquivalent: "")
         }
@@ -87,15 +87,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateStatusIcon() {
-        let warning = Self.pasteboardAccessDenied || !Paster.isTrusted
+        let warning = PasteboardMonitor.isAccessDenied || !Paster.isTrusted
         let symbol = warning ? "exclamationmark.triangle" : "doc.on.clipboard"
         statusItem?.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "PasteClip")
     }
 
     @objc private func openPrivacySettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security") {
-            NSWorkspace.shared.open(url)
-        }
+        PasteboardMonitor.openPrivacySettings()
     }
 
     @objc private func openAccessibilitySettings() {
@@ -119,10 +117,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: - Helpers
-
-    private static var pasteboardAccessDenied: Bool {
-        NSPasteboard.general.accessBehavior == .alwaysDeny
-    }
 
     private static func databaseURL() throws -> URL {
         let directory = try FileManager.default

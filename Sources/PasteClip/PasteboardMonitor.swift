@@ -20,6 +20,16 @@ final class PasteboardMonitor {
         changeCount = pasteboard.changeCount
     }
 
+    static var isAccessDenied: Bool {
+        NSPasteboard.general.accessBehavior == .alwaysDeny
+    }
+
+    static func openPrivacySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     func start() {
         let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             // Scheduled on the main run loop below.
@@ -35,7 +45,7 @@ final class PasteboardMonitor {
         guard count != changeCount else { return }
         changeCount = count
 
-        guard pasteboard.accessBehavior != .alwaysDeny else {
+        guard !Self.isAccessDenied else {
             onAccessDenied()
             return
         }
