@@ -132,18 +132,39 @@ private final class ClipCellView: NSTableCellView {
         (accessory as NSString).size(withAttributes: [.font: accessoryFont]).width.rounded(.up) + 4 + spacing
     }
 
+    static func attributedText(_ text: RowText, emphasized: Bool) -> NSAttributedString {
+        let primary: NSColor = emphasized ? .alternateSelectedControlTextColor : .labelColor
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        let result = NSMutableAttributedString(string: text.string, attributes: [
+            .font: font, .foregroundColor: primary, .paragraphStyle: paragraph,
+        ])
+        if let dimmedFrom = text.dimmedFrom {
+            let secondary = emphasized ? primary.withAlphaComponent(0.7) : .secondaryLabelColor
+            result.addAttribute(.foregroundColor, value: secondary, range: NSRange(location: dimmedFrom, length: result.length - dimmedFrom))
+        }
+        return result
+    }
+
+    private var text = RowText(string: "")
+
     /// `accessory` is short trailing text such as a shortcut hint; nil hides it.
-    func configure(text: String, thumbnail: NSImage?, accessory: String?) {
-        textField?.stringValue = text
+    func configure(text: RowText, thumbnail: NSImage?, accessory: String?) {
+        self.text = text
+        textField?.attributedStringValue = Self.attributedText(text, emphasized: backgroundStyle == .emphasized)
         imageView?.image = thumbnail
         imageView?.isHidden = thumbnail == nil
         accessoryLabel.stringValue = accessory ?? ""
         accessoryLabel.isHidden = accessory == nil
     }
 
-    /// The accessory sits inside the stack view, so pass the selection style to it explicitly.
+    /// The attributed text carries its own colors, and the accessory sits inside the stack view,
+    /// so both follow the selection style explicitly.
     override var backgroundStyle: NSView.BackgroundStyle {
-        didSet { accessoryLabel.cell?.backgroundStyle = backgroundStyle }
+        didSet {
+            accessoryLabel.cell?.backgroundStyle = backgroundStyle
+            textField?.attributedStringValue = Self.attributedText(text, emphasized: backgroundStyle == .emphasized)
+        }
     }
 
     @available(*, unavailable)
@@ -393,6 +414,11 @@ final class PanelController: NSObject {
 
     private func isTruncated(_ clip: Clip, row: Int) -> Bool {
         if clip.isAbridged { return true }
+        return ClipCellView.attributedText(rowText(for: clip), emphasized: false).size().width > textWidth(for: clip, row: row)
+    }
+
+    /// Width the row's text label gets.
+    private func textWidth(for clip: Clip, row: Int) -> CGFloat {
         var width = tableView.frameOfCell(atColumn: 0, row: row).width - ClipCellView.textPadding
         if let link = clip.link, thumbnails.image(for: link) != nil {
             width -= ThumbnailCache.size.width + ClipCellView.spacing
@@ -400,7 +426,11 @@ final class PanelController: NSObject {
         if let accessory = accessory(for: row) {
             width -= ClipCellView.accessoryWidth(accessory)
         }
-        return (clip.preview as NSString).size(withAttributes: [.font: ClipCellView.font]).width > width
+        return width
+    }
+
+    private func rowText(for clip: Clip) -> RowText {
+        clip.link == nil ? RowText(string: clip.preview) : .link(clip.preview)
     }
 
     /// Trailing text of a row. History: the ⌘1–⌘9 hint while ⌘ is held; the hints mirror
@@ -648,7 +678,11 @@ extension PanelController: NSTableViewDataSource, NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let cell = tableView.makeView(withIdentifier: ClipCellView.identifier, owner: nil) as? ClipCellView ?? ClipCellView()
         let clip = clip(at: row)
-        cell.configure(text: clip?.preview ?? "", thumbnail: clip?.link.flatMap(thumbnails.image(for:)), accessory: accessory(for: row))
+        cell.configure(
+            text: clip.map(rowText(for:)) ?? RowText(string: ""),
+            thumbnail: clip?.link.flatMap(thumbnails.image(for:)),
+            accessory: accessory(for: row)
+        )
         return cell
     }
 }
