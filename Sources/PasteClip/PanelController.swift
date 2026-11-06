@@ -404,7 +404,7 @@ final class PanelController: NSObject {
             }
             return
         }
-        let height = previewCard.show(excerpt.text, length: excerpt.length, maxHeight: Self.maxPreviewHeight)
+        let height = previewCard.show(excerpt.text, length: excerpt.length, usedAt: excerpt.usedAt, maxHeight: Self.maxPreviewHeight)
         // Right of the list, or left when the screen has no room on the right.
         var frame = NSRect(x: cardFrame.maxX + Self.previewGap, y: cardFrame.maxY - height,
                            width: PreviewCard.width, height: height)

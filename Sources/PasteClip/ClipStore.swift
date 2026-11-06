@@ -183,11 +183,12 @@ final class ClipStore {
         return clips
     }
 
-    /// Returns at most `limit` characters of the clip's text and its total length in characters.
-    func excerpt(of id: Int64, limit: Int) throws -> (text: String, length: Int)? {
-        var excerpt: (String, Int)?
-        try run("SELECT substr(text, 1, ?), length(text) FROM clips WHERE id = ?", [.int(Int64(limit)), .int(id)]) {
-            excerpt = (Self.string($0, 0) ?? "", Int(sqlite3_column_int64($0, 1)))
+    /// Returns at most `limit` characters of the clip's text, its total length in characters,
+    /// and when it was last copied.
+    func excerpt(of id: Int64, limit: Int) throws -> (text: String, length: Int, usedAt: Date)? {
+        var excerpt: (String, Int, Date)?
+        try run("SELECT substr(text, 1, ?), length(text), used_at FROM clips WHERE id = ?", [.int(Int64(limit)), .int(id)]) {
+            excerpt = (Self.string($0, 0) ?? "", Int(sqlite3_column_int64($0, 1)), Date(timeIntervalSince1970: sqlite3_column_double($0, 2)))
         }
         return excerpt
     }

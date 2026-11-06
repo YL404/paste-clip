@@ -50,6 +50,7 @@ final class PreviewCard: NSGlassEffectView {
 
         footer.textColor = .secondaryLabelColor
         footer.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        footer.lineBreakMode = .byTruncatingTail
 
         let content = NSView()
         for view in [scrollView, footer] as [NSView] {
@@ -73,12 +74,14 @@ final class PreviewCard: NSGlassEffectView {
 
     /// Shows `text`, whose full length is `length` characters, and returns the card height
     /// that fits it, capped at `maxHeight`.
-    func show(_ text: String, length: Int, maxHeight: CGFloat) -> CGFloat {
+    func show(_ text: String, length: Int, usedAt: Date, maxHeight: CGFloat) -> CGFloat {
         textView.string = text
         textView.scroll(.zero)
-        footer.stringValue = length > Self.characterLimit
+        let size = length > Self.characterLimit
             ? "共 \(length.formatted()) 字，仅显示前 \(Self.characterLimit.formatted()) 字"
             : "共 \(length.formatted()) 字"
+        // Relative ("3分钟前", "昨天") keeps the line short enough for the card width.
+        footer.stringValue = "复制于 \(usedAt.formatted(.relative(presentation: .named))) · \(size)"
 
         let padding = textView.textContainer?.lineFragmentPadding ?? 0
         let textWidth = Self.width - 2 * (Self.textInset.width + padding)
