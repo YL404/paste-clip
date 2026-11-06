@@ -21,6 +21,45 @@ private final class MarginView: NSView {
     }
 }
 
+/// Bottom strip of the list card. Dragging it sets the list height.
+private final class ResizeHandle: NSView {
+    /// Called with the mouse position in screen coordinates while dragging.
+    var onDrag: ((NSPoint) -> Void)?
+    var onDragEnd: (() -> Void)?
+
+    /// The hint label inside the strip must not take the drag.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        super.hitTest(point) == nil ? nil : self
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas {
+            removeTrackingArea(area)
+        }
+        // The app is never active, so the area must track in inactive windows too.
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.cursorUpdate, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        NSCursor.frameResize(position: .bottom, directions: .all).set()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        NSCursor.arrow.set()
+    }
+
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseDragged(with event: NSEvent) {
+        onDrag?(NSEvent.mouseLocation)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        onDragEnd?()
+    }
+}
+
 /// Keeps the selection in accent color although the search field, not the table, has focus.
 private final class ClipRowView: NSTableRowView {
     override var isEmphasized: Bool {
@@ -107,7 +146,9 @@ final class PanelController: NSObject {
     private static let previewGap: CGFloat = 8
     private static let maxPreviewHeight: CGFloat = 420
     private static let rowHeight: CGFloat = 32
-    private static let maxVisibleRows = 10
+    private static let defaultVisibleRows = 10
+    private static let minVisibleRows = 3
+    private static let listHeightKey = "PanelListHeight"
     private static let searchHeight: CGFloat = 44
     private static let footerHeight: CGFloat = 26
     /// Space the inset table style adds above and below the rows.
@@ -126,6 +167,7 @@ final class PanelController: NSObject {
     private let tableView = NSTableView()
     private let emptyLabel = NSTextField(labelWithString: "")
     private let hintLabel = NSTextField(labelWithString: "")
+    private let resizeHandle = ResizeHandle()
 
     private var list = ClipList.history
     private var query = ""
@@ -133,6 +175,9 @@ final class PanelController: NSObject {
     /// Rows are read from SQLite one page at a time; only a few pages stay in memory.
     private var pages: [Int: [Clip]] = [:]
     private var isReloading = false
+    /// Height of the row area set by dragging the bottom strip; nil until the user drags it.
+    /// The card shrinks below it when there are fewer rows.
+    private var draggedListHeight: CGFloat?
 
     /// Card frames in screen coordinates. The window is sized around them.
     private var cardFrame = NSRect.zero
@@ -149,6 +194,8 @@ final class PanelController: NSObject {
             backing: .buffered,
             defer: true
         )
+        let saved = UserDefaults.standard.double(forKey: Self.listHeightKey)
+        draggedListHeight = saved > 0 ? saved : nil
         super.init()
         configurePanel()
         thumbnails.onLoad = { [weak self] link in self?.reloadRows(showing: link) }
@@ -239,9 +286,14 @@ final class PanelController: NSObject {
         hintLabel.textColor = .tertiaryLabelColor
         hintLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         hintLabel.lineBreakMode = .byTruncatingTail
+        hintLabel.translatesAutoresizingMaskIntoConstraints = false
+        resizeHandle.addSubview(hintLabel)
+        resizeHandle.toolTip = "拖动调整高度"
+        resizeHandle.onDrag = { [weak self] mouse in self?.resizeList(bottom: mouse.y) }
+        resizeHandle.onDragEnd = { [weak self] in self?.finishResizing() }
 
         let content = NSView()
-        for view in [searchField, trashButton, scrollView, emptyLabel, hintLabel] as [NSView] {
+        for view in [searchField, trashButton, scrollView, emptyLabel, resizeHandle] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
@@ -258,9 +310,13 @@ final class PanelController: NSObject {
             scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -Self.footerHeight),
             emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
-            hintLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
-            hintLabel.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -16),
-            hintLabel.centerYAnchor.constraint(equalTo: content.bottomAnchor, constant: -Self.footerHeight / 2),
+            hintLabel.leadingAnchor.constraint(equalTo: resizeHandle.leadingAnchor, constant: 16),
+            hintLabel.trailingAnchor.constraint(lessThanOrEqualTo: resizeHandle.trailingAnchor, constant: -16),
+            hintLabel.centerYAnchor.constraint(equalTo: resizeHandle.centerYAnchor),
+            resizeHandle.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            resizeHandle.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            resizeHandle.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            resizeHandle.heightAnchor.constraint(equalToConstant: Self.footerHeight),
         ])
 
         listCard.cornerRadius = 16
@@ -349,16 +405,44 @@ final class PanelController: NSObject {
 
         emptyLabel.isHidden = rowCount > 0
         emptyLabel.stringValue = !query.isEmpty ? "没有匹配的记录" : list == .history ? "暂无记录" : "回收站为空"
+        updateCardFrame()
+        updatePreview()
+    }
 
-        // Keep the card's top edge in place and the whole card on screen.
-        let visibleRows = CGFloat(min(max(rowCount, 1), Self.maxVisibleRows))
-        let height = Self.searchHeight + visibleRows * (Self.rowHeight + tableView.intercellSpacing.height)
-            + Self.tableInsets + Self.footerHeight
+    private var rowStride: CGFloat { Self.rowHeight + tableView.intercellSpacing.height }
+    /// Card height outside the row area.
+    private var chromeHeight: CGFloat { Self.searchHeight + Self.footerHeight }
+
+    private func listHeight(rows: Int) -> CGFloat {
+        CGFloat(rows) * rowStride + Self.tableInsets
+    }
+
+    /// Fits the card to the rows, up to the dragged height, keeping its top edge in place
+    /// and the whole card on screen.
+    private func updateCardFrame() {
+        let maxHeight = draggedListHeight ?? listHeight(rows: Self.defaultVisibleRows)
+        let height = min(chromeHeight + min(listHeight(rows: max(rowCount, 1)), maxHeight), visibleFrame.height)
         var card = NSRect(x: cardFrame.minX, y: cardFrame.maxY - height, width: Self.width, height: height)
         card.origin.x = min(max(card.minX, visibleFrame.minX), visibleFrame.maxX - card.width)
         card.origin.y = min(max(card.minY, visibleFrame.minY), visibleFrame.maxY - card.height)
         cardFrame = card
         layoutWindow()
+    }
+
+    /// Moves the card's bottom edge to the mouse while dragging the bottom strip.
+    private func resizeList(bottom: CGFloat) {
+        let top = cardFrame.maxY
+        let height = min(max(top - bottom, chromeHeight + listHeight(rows: Self.minVisibleRows)), top - visibleFrame.minY)
+        draggedListHeight = height - chromeHeight
+        cardFrame = NSRect(x: cardFrame.minX, y: top - height, width: Self.width, height: height)
+        layoutWindow()
+    }
+
+    /// Saves the dragged height and shrinks the card back when it is taller than its rows.
+    private func finishResizing() {
+        guard let draggedListHeight else { return }
+        UserDefaults.standard.set(Double(draggedListHeight), forKey: Self.listHeightKey)
+        updateCardFrame()
         updatePreview()
     }
 
