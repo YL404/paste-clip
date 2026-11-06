@@ -9,6 +9,8 @@ struct Clip: Equatable {
     let link: URL?
     /// The one-line preview leaves out text: line breaks or anything past the preview length.
     let isAbridged: Bool
+    /// When the clip was moved to the trash; nil in the history.
+    let deletedAt: Date?
 }
 
 enum ClipList {
@@ -118,6 +120,12 @@ final class ClipStore {
         try run("DELETE FROM clips WHERE deleted_at < ?", .real(now() - Self.trashRetention))
     }
 
+    /// Whole days, rounded up, until a clip trashed at `deletedAt` is purged.
+    static func trashDaysLeft(deletedAt: Date, now: Date = Date()) -> Int {
+        let seconds = deletedAt.addingTimeInterval(trashRetention).timeIntervalSince(now)
+        return max(1, Int((seconds / (24 * 60 * 60)).rounded(.up)))
+    }
+
     // MARK: - Reads
 
     func count(in list: ClipList, matching query: String) throws -> Int {
@@ -136,7 +144,7 @@ final class ClipStore {
         // trimming means line breaks or truncation.
         try run(
             """
-            SELECT id, preview, link, trim(text, char(32, 9, 10, 13)) <> preview FROM clips
+            SELECT id, preview, link, trim(text, char(32, 9, 10, 13)) <> preview, deleted_at FROM clips
             WHERE \(filter) ORDER BY \(order) DESC LIMIT ? OFFSET ?
             """,
             values + [.int(Int64(limit)), .int(Int64(offset))]
@@ -145,7 +153,8 @@ final class ClipStore {
                 id: sqlite3_column_int64(statement, 0),
                 preview: Self.string(statement, 1) ?? "",
                 link: Self.string(statement, 2).flatMap(URL.init(string:)),
-                isAbridged: sqlite3_column_int(statement, 3) != 0
+                isAbridged: sqlite3_column_int(statement, 3) != 0,
+                deletedAt: Self.date(statement, 4)
             ))
         }
         return clips
@@ -247,6 +256,11 @@ final class ClipStore {
         guard let bytes = sqlite3_column_text(statement, column) else { return nil }
         let count = Int(sqlite3_column_bytes(statement, column))
         return String(decoding: UnsafeBufferPointer(start: bytes, count: count), as: UTF8.self)
+    }
+
+    private static func date(_ statement: OpaquePointer, _ column: Int32) -> Date? {
+        guard sqlite3_column_type(statement, column) != SQLITE_NULL else { return nil }
+        return Date(timeIntervalSince1970: sqlite3_column_double(statement, column))
     }
 
     private func lastError() -> SQLiteError {

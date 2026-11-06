@@ -403,10 +403,16 @@ final class PanelController: NSObject {
         return (clip.preview as NSString).size(withAttributes: [.font: ClipCellView.font]).width > width
     }
 
-    /// Trailing text of a row: the ⌘1–⌘9 hint while ⌘ is held. The hints mirror ⌘1–⌘9,
-    /// which only work in the history.
+    /// Trailing text of a row. History: the ⌘1–⌘9 hint while ⌘ is held; the hints mirror
+    /// ⌘1–⌘9, which only work in the history. Trash: days until the clip is deleted for good.
     private func accessory(for row: Int) -> String? {
-        list == .history && showsShortcutHints && row < 9 ? "⌘\(row + 1)" : nil
+        switch list {
+        case .history:
+            return showsShortcutHints && row < 9 ? "⌘\(row + 1)" : nil
+        case .trash:
+            guard let deletedAt = clip(at: row)?.deletedAt else { return nil }
+            return "\(ClipStore.trashDaysLeft(deletedAt: deletedAt)) 天后删除"
+        }
     }
 
     private func modifiersChanged(_ flags: NSEvent.ModifierFlags) {
@@ -516,7 +522,7 @@ final class PanelController: NSObject {
         trashButton.contentTintColor = inTrash ? .controlAccentColor : .secondaryLabelColor
         searchField.placeholderString = inTrash ? "搜索回收站" : "搜索"
         hintLabel.stringValue = inTrash
-            ? "↩ 恢复 · ⌘⌫ 永久删除 · ⌘T 返回历史 · 30 天后自动删除"
+            ? "↩ 恢复 · ⌘⌫ 永久删除 · ⌘T 返回历史 · 放入 30 天后自动删除"
             : "↩ 粘贴 · ⌘1–9 快速粘贴 · ⌘⌫ 删除 · ⌘T 回收站"
     }
 
