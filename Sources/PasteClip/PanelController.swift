@@ -206,9 +206,8 @@ final class PanelController: NSObject {
     private let emptyLabel = NSTextField(labelWithString: "")
     private let hintLabel = NSTextField(labelWithString: "")
     private let resizeHandle = ResizeHandle()
-    /// Missing permission notice under the search field.
-    private let banner = NSStackView()
-    private let bannerLabel = NSTextField(labelWithString: "")
+    /// Missing permission notice under the search field, created the first time it is needed.
+    private var banner: (view: NSView, label: NSTextField)?
     private var bannerAction: (() -> Void)?
     private var listTopConstraint: NSLayoutConstraint?
 
@@ -342,24 +341,8 @@ final class PanelController: NSObject {
         resizeHandle.onDrag = { [weak self] mouse in self?.resizeList(bottom: mouse.y) }
         resizeHandle.onDragEnd = { [weak self] in self?.finishResizing() }
 
-        let bannerIcon = NSImageView(image: NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil) ?? NSImage())
-        bannerIcon.contentTintColor = .systemYellow
-        bannerLabel.font = .systemFont(ofSize: 12)
-        bannerLabel.lineBreakMode = .byTruncatingTail
-        bannerLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        // The message stretches, so the button sits at the trailing edge.
-        bannerLabel.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
-        let bannerButton = NSButton(title: "打开设置", target: self, action: #selector(bannerButtonClicked))
-        bannerButton.controlSize = .small
-        bannerButton.refusesFirstResponder = true
-        for view in [bannerIcon, bannerLabel, bannerButton] {
-            banner.addArrangedSubview(view)
-        }
-        banner.spacing = 6
-        banner.isHidden = true
-
         let content = NSView()
-        for view in [searchField, trashButton, banner, scrollView, emptyLabel, resizeHandle] as [NSView] {
+        for view in [searchField, trashButton, scrollView, emptyLabel, resizeHandle] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
@@ -372,10 +355,6 @@ final class PanelController: NSObject {
             trashButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
             trashButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             trashButton.widthAnchor.constraint(equalToConstant: 20),
-            banner.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.searchHeight),
-            banner.heightAnchor.constraint(equalToConstant: Self.bannerHeight),
-            banner.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
-            banner.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
             listTop,
             scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
@@ -530,8 +509,10 @@ final class PanelController: NSObject {
     private var rowStride: CGFloat { Self.rowHeight + tableView.intercellSpacing.height }
     /// Card height outside the row area.
     private var chromeHeight: CGFloat {
-        Self.searchHeight + (banner.isHidden ? 0 : Self.bannerHeight) + Self.footerHeight
+        Self.searchHeight + (isBannerVisible ? Self.bannerHeight : 0) + Self.footerHeight
     }
+
+    private var isBannerVisible: Bool { banner?.view.isHidden == false }
 
     private func listHeight(rows: Int) -> CGFloat {
         CGFloat(rows) * rowStride + Self.tableInsets
@@ -608,17 +589,50 @@ final class PanelController: NSObject {
 
     /// Shows the most important missing permission, checked each time the panel opens.
     private func updateBanner() {
+        let message: String?
         if PasteboardMonitor.isAccessDenied {
-            bannerLabel.stringValue = "无法读取剪贴板，新复制的内容不会被记录"
+            message = "无法读取剪贴板，新复制的内容不会被记录"
             bannerAction = PasteboardMonitor.openPrivacySettings
         } else if !Paster.isTrusted {
-            bannerLabel.stringValue = "未开启辅助功能权限，无法自动粘贴"
+            message = "未开启辅助功能权限，无法自动粘贴"
             bannerAction = Paster.openAccessibilitySettings
         } else {
+            message = nil
             bannerAction = nil
         }
-        banner.isHidden = bannerAction == nil
-        listTopConstraint?.constant = Self.searchHeight + (banner.isHidden ? 0 : Self.bannerHeight)
+        if message != nil, banner == nil {
+            banner = makeBanner()
+        }
+        banner?.label.stringValue = message ?? ""
+        banner?.view.isHidden = message == nil
+        listTopConstraint?.constant = Self.searchHeight + (isBannerVisible ? Self.bannerHeight : 0)
+    }
+
+    private func makeBanner() -> (view: NSView, label: NSTextField)? {
+        guard let content = listCard.contentView else { return nil }
+        let icon = NSImageView(image: NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil) ?? NSImage())
+        icon.contentTintColor = .systemYellow
+        let label = NSTextField(labelWithString: "")
+        label.font = .systemFont(ofSize: 12)
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The message stretches, so the button sits at the trailing edge.
+        label.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
+        let button = NSButton(title: "打开设置", target: self, action: #selector(bannerButtonClicked))
+        button.controlSize = .small
+        button.refusesFirstResponder = true
+
+        let view = NSStackView(views: [icon, label, button])
+        view.spacing = 6
+        view.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.searchHeight),
+            view.heightAnchor.constraint(equalToConstant: Self.bannerHeight),
+            view.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            view.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+        ])
+        return (view, label)
     }
 
     @objc private func bannerButtonClicked() {
