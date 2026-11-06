@@ -80,6 +80,7 @@ private final class ClipRowView: NSTableRowView {
 private final class ClipCellView: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("ClipCell")
     static let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+    static let matchFont = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .bold)
     /// Horizontal space the cell uses around the text: stack insets plus the label's own padding.
     static let textPadding: CGFloat = 12
     static let spacing: CGFloat = 8
@@ -142,6 +143,9 @@ private final class ClipCellView: NSTableCellView {
         if let dimmedFrom = text.dimmedFrom {
             let secondary = emphasized ? primary.withAlphaComponent(0.7) : .secondaryLabelColor
             result.addAttribute(.foregroundColor, value: secondary, range: NSRange(location: dimmedFrom, length: result.length - dimmedFrom))
+        }
+        for match in text.matches {
+            result.addAttribute(.font, value: matchFont, range: match)
         }
         return result
     }
@@ -413,8 +417,25 @@ final class PanelController: NSObject {
     }
 
     private func isTruncated(_ clip: Clip, row: Int) -> Bool {
-        if clip.isAbridged { return true }
-        return ClipCellView.attributedText(rowText(for: clip), emphasized: false).size().width > textWidth(for: clip, row: row)
+        display(clip, row: row).isTruncated
+    }
+
+    /// The row's text, and whether it leaves out part of the clip.
+    private func display(_ clip: Clip, row: Int) -> (text: RowText, isTruncated: Bool) {
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = (clip.link == nil ? RowText(string: clip.preview) : .link(clip.preview)).highlighting(term)
+        let width = textWidth(for: clip, row: row)
+        let attributed = ClipCellView.attributedText(text, emphasized: false)
+        // When the first match is cut off or not in the preview at all, show the text around it.
+        if let excerpt = clip.matchExcerpt {
+            let matchFits = text.matches.first.map {
+                attributed.attributedSubstring(from: NSRange(location: 0, length: NSMaxRange($0))).size().width <= width
+            } ?? false
+            if !matchFits {
+                return (RowText(string: excerpt).highlighting(term), true)
+            }
+        }
+        return (text, clip.isAbridged || attributed.size().width > width)
     }
 
     /// Width the row's text label gets.
@@ -427,10 +448,6 @@ final class PanelController: NSObject {
             width -= ClipCellView.accessoryWidth(accessory)
         }
         return width
-    }
-
-    private func rowText(for clip: Clip) -> RowText {
-        clip.link == nil ? RowText(string: clip.preview) : .link(clip.preview)
     }
 
     /// Trailing text of a row. History: the ⌘1–⌘9 hint while ⌘ is held; the hints mirror
@@ -679,7 +696,7 @@ extension PanelController: NSTableViewDataSource, NSTableViewDelegate {
         let cell = tableView.makeView(withIdentifier: ClipCellView.identifier, owner: nil) as? ClipCellView ?? ClipCellView()
         let clip = clip(at: row)
         cell.configure(
-            text: clip.map(rowText(for:)) ?? RowText(string: ""),
+            text: clip.map { display($0, row: row).text } ?? RowText(string: ""),
             thumbnail: clip?.link.flatMap(thumbnails.image(for:)),
             accessory: accessory(for: row)
         )
