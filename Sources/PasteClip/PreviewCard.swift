@@ -45,8 +45,7 @@ final class PreviewCard: NSGlassEffectView {
         let scrollView = NSScrollView()
         scrollView.documentView = textView
         scrollView.drawsBackground = false
-        scrollView.hasVerticalScroller = true
-        scrollView.autohidesScrollers = true
+        scrollView.hasVerticalScroller = false
 
         footer.textColor = .secondaryLabelColor
         footer.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
