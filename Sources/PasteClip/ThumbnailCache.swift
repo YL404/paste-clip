@@ -11,8 +11,10 @@ final class ThumbnailCache {
     private let directory: URL
     private let memory = NSCache<NSURL, NSImage>()
     private var tasks: [URL: (id: UUID, task: Task<Void, Never>)] = [:]
-    /// Links whose thumbnail could not be fetched; retried after the next launch.
+    /// Links without a usable image; retried after the next launch.
     private var failed: Set<URL> = []
+    /// Links whose download hit a network error; retried the next time the panel opens.
+    private var networkFailed: Set<URL> = []
     var onLoad: ((URL) -> Void)?
 
     init() throws {
@@ -44,11 +46,12 @@ final class ThumbnailCache {
             entry.task.cancel()
         }
         tasks = [:]
+        networkFailed = []
         memory.removeAllObjects()
     }
 
     private func fetch(_ link: URL, to file: URL) {
-        guard tasks[link] == nil, !failed.contains(link) else { return }
+        guard tasks[link] == nil, !failed.contains(link), !networkFailed.contains(link) else { return }
         let id = UUID()
         let task = Task { @concurrent [weak self] in
             let result = await ThumbnailDownloader.download(link, to: file)
@@ -63,6 +66,7 @@ final class ThumbnailCache {
         switch result {
         case .saved: onLoad?(link)
         case .failed: failed.insert(link)
+        case .networkError: networkFailed.insert(link)
         case .cancelled: break
         }
     }
@@ -78,7 +82,7 @@ nonisolated enum ThumbnailDownloader {
     static let size = CGSize(width: 48, height: 27)
 
     enum Result {
-        case saved, failed, cancelled
+        case saved, failed, networkError, cancelled
     }
 
     private static let session: URLSession = {
@@ -113,7 +117,9 @@ nonisolated enum ThumbnailDownloader {
             try png.write(to: file, options: .atomic)
             return .saved
         } catch {
-            return Task.isCancelled ? .cancelled : .failed
+            if Task.isCancelled { return .cancelled }
+            // Timeouts, TLS and connection errors are usually transient; worth another try later.
+            return error is URLError ? .networkError : .failed
         }
     }
 
