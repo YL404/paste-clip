@@ -4,11 +4,20 @@ import AppKit
 /// so the previously active app stays frontmost and receives the paste.
 private final class ClipPanel: NSPanel {
     var keyEquivalentHandler: ((NSEvent) -> Bool)?
+    var onModifiersChanged: ((NSEvent.ModifierFlags) -> Void)?
 
     override var canBecomeKey: Bool { true }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         keyEquivalentHandler?(event) == true || super.performKeyEquivalent(with: event)
+    }
+
+    // Caught here because the search field's editor, not the panel, is first responder.
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .flagsChanged {
+            onModifiersChanged?(event.modifierFlags.intersection(.deviceIndependentFlagsMask))
+        }
+        super.sendEvent(event)
     }
 }
 
@@ -73,21 +82,16 @@ private final class ClipCellView: NSTableCellView {
     static let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
     /// Horizontal space the cell uses around the text: stack insets plus the label's own padding.
     static let textPadding: CGFloat = 12
-    static let thumbnailSpacing: CGFloat = 8
-    /// Width of the ⌘1–⌘9 hint column. Digits are monospaced, so any digit measures the same;
-    /// the extra 4 points cover the label's own padding.
-    static let indexFont = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-    static let indexWidth = ("⌘8" as NSString).size(withAttributes: [.font: indexFont]).width.rounded(.up) + 4
+    static let spacing: CGFloat = 8
+    static let accessoryFont = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
 
-    private let indexLabel = NSTextField(labelWithString: "")
+    private let accessoryLabel = NSTextField(labelWithString: "")
 
     init() {
         super.init(frame: .zero)
         identifier = Self.identifier
-        indexLabel.font = Self.indexFont
-        indexLabel.textColor = .secondaryLabelColor
-        indexLabel.alignment = .right
-        indexLabel.widthAnchor.constraint(equalToConstant: Self.indexWidth).isActive = true
+        accessoryLabel.font = Self.accessoryFont
+        accessoryLabel.textColor = .secondaryLabelColor
 
         let label = NSTextField(labelWithString: "")
         label.font = Self.font
@@ -95,6 +99,8 @@ private final class ClipCellView: NSTableCellView {
         label.cell?.truncatesLastVisibleLine = true
         label.maximumNumberOfLines = 1
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The text stretches, so the accessory sits at the trailing edge.
+        label.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
 
         let thumbnail = NSImageView()
         thumbnail.imageScaling = .scaleAxesIndependently
@@ -107,31 +113,37 @@ private final class ClipCellView: NSTableCellView {
         ])
 
         // Hidden views are detached from the stack, so rows without a thumbnail start with text.
-        let stack = NSStackView(views: [indexLabel, thumbnail, label])
-        stack.spacing = Self.thumbnailSpacing
+        let stack = NSStackView(views: [thumbnail, label, accessoryLabel])
+        stack.spacing = Self.spacing
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         textField = label
         imageView = thumbnail
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
-    /// `index` nil hides the hint column; an empty string keeps it so text stays aligned.
-    func configure(index: String?, text: String, thumbnail: NSImage?) {
-        indexLabel.stringValue = index ?? ""
-        indexLabel.isHidden = index == nil
+    /// Width the accessory takes from the text, including the spacing before it.
+    static func accessoryWidth(_ accessory: String) -> CGFloat {
+        // The extra 4 points cover the label's own padding.
+        (accessory as NSString).size(withAttributes: [.font: accessoryFont]).width.rounded(.up) + 4 + spacing
+    }
+
+    /// `accessory` is short trailing text such as a shortcut hint; nil hides it.
+    func configure(text: String, thumbnail: NSImage?, accessory: String?) {
         textField?.stringValue = text
         imageView?.image = thumbnail
         imageView?.isHidden = thumbnail == nil
+        accessoryLabel.stringValue = accessory ?? ""
+        accessoryLabel.isHidden = accessory == nil
     }
 
-    /// The hint sits inside the stack view, so pass the selection style to it explicitly.
+    /// The accessory sits inside the stack view, so pass the selection style to it explicitly.
     override var backgroundStyle: NSView.BackgroundStyle {
-        didSet { indexLabel.cell?.backgroundStyle = backgroundStyle }
+        didSet { accessoryLabel.cell?.backgroundStyle = backgroundStyle }
     }
 
     @available(*, unavailable)
@@ -178,6 +190,9 @@ final class PanelController: NSObject {
     /// Height of the row area set by dragging the bottom strip; nil until the user drags it.
     /// The card shrinks below it when there are fewer rows.
     private var draggedListHeight: CGFloat?
+    /// ⌘1–⌘9 hints show while ⌘ is held, but not while it is still held from the global shortcut.
+    private var showsShortcutHints = false
+    private var commandWasDown = false
 
     /// Card frames in screen coordinates. The window is sized around them.
     private var cardFrame = NSRect.zero
@@ -208,6 +223,8 @@ final class PanelController: NSObject {
         list = .history
         query = ""
         searchField.stringValue = ""
+        showsShortcutHints = false
+        commandWasDown = NSEvent.modifierFlags.contains(.command)
         updateListAppearance()
 
         // The card's top-left corner goes to the mouse; reload() sizes it and keeps it on screen.
@@ -246,6 +263,7 @@ final class PanelController: NSObject {
         panel.hasShadow = false
         panel.delegate = self
         panel.keyEquivalentHandler = { [weak self] event in self?.handleKeyEquivalent(event) ?? false }
+        panel.onModifiersChanged = { [weak self] flags in self?.modifiersChanged(flags) }
 
         searchField.isBordered = false
         searchField.drawsBackground = false
@@ -377,12 +395,30 @@ final class PanelController: NSObject {
         if clip.isAbridged { return true }
         var width = tableView.frameOfCell(atColumn: 0, row: row).width - ClipCellView.textPadding
         if let link = clip.link, thumbnails.image(for: link) != nil {
-            width -= ThumbnailCache.size.width + ClipCellView.thumbnailSpacing
+            width -= ThumbnailCache.size.width + ClipCellView.spacing
         }
-        if list == .history {
-            width -= ClipCellView.indexWidth + ClipCellView.thumbnailSpacing
+        if let accessory = accessory(for: row) {
+            width -= ClipCellView.accessoryWidth(accessory)
         }
         return (clip.preview as NSString).size(withAttributes: [.font: ClipCellView.font]).width > width
+    }
+
+    /// Trailing text of a row: the ⌘1–⌘9 hint while ⌘ is held. The hints mirror ⌘1–⌘9,
+    /// which only work in the history.
+    private func accessory(for row: Int) -> String? {
+        list == .history && showsShortcutHints && row < 9 ? "⌘\(row + 1)" : nil
+    }
+
+    private func modifiersChanged(_ flags: NSEvent.ModifierFlags) {
+        let commandDown = flags.contains(.command)
+        let shows = commandDown && (showsShortcutHints || !commandWasDown)
+        commandWasDown = commandDown
+        guard shows != showsShortcutHints else { return }
+        showsShortcutHints = shows
+        guard list == .history else { return }
+        let visible = tableView.rows(in: tableView.visibleRect)
+        tableView.reloadData(forRowIndexes: IndexSet(integersIn: visible.lowerBound..<visible.upperBound), columnIndexes: IndexSet(integer: 0))
+        updatePreview()
     }
 
     /// Returns focus to the search field without selecting its text, so typing continues.
@@ -606,9 +642,7 @@ extension PanelController: NSTableViewDataSource, NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let cell = tableView.makeView(withIdentifier: ClipCellView.identifier, owner: nil) as? ClipCellView ?? ClipCellView()
         let clip = clip(at: row)
-        // The hints mirror ⌘1–⌘9, which only work in the history.
-        let index = list == .history ? (row < 9 ? "⌘\(row + 1)" : "") : nil
-        cell.configure(index: index, text: clip?.preview ?? "", thumbnail: clip?.link.flatMap(thumbnails.image(for:)))
+        cell.configure(text: clip?.preview ?? "", thumbnail: clip?.link.flatMap(thumbnails.image(for:)), accessory: accessory(for: row))
         return cell
     }
 }
