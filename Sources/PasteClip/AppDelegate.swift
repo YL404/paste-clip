@@ -35,13 +35,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         logged("Purge trash") { try store.purgeExpiredTrash() }
         let monitor = PasteboardMonitor(
             onText: { text in logged("Record clip") { try store.record(text) } },
+            onImage: { data in
+                guard let image = ClipImage(data: data) else { return }
+                logged("Record image") { try store.record(image) }
+            },
             onAccessDenied: { [weak self] in self?.updateStatusIcon() }
         )
         monitor.start()
         self.monitor = monitor
 
-        panel = PanelController(store: store, thumbnails: thumbnails) { [weak self] text in
-            Paster.paste(text)
+        panel = PanelController(store: store, thumbnails: thumbnails) { [weak self] content in
+            Paster.paste(content)
             self?.updateStatusIcon()
         }
 

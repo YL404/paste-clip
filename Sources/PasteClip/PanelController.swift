@@ -199,7 +199,7 @@ final class PanelController: NSObject {
 
     private let store: ClipStore
     private let thumbnails: ThumbnailCache
-    private let onPaste: (String) -> Void
+    private let onPaste: (ClipContent) -> Void
     private let panel: ClipPanel
     private let listCard = NSGlassEffectView()
     private let previewCard = PreviewCard()
@@ -232,7 +232,7 @@ final class PanelController: NSObject {
     private var previewFrame: NSRect?
     private var visibleFrame = NSRect.zero
 
-    init(store: ClipStore, thumbnails: ThumbnailCache, onPaste: @escaping (String) -> Void) {
+    init(store: ClipStore, thumbnails: ThumbnailCache, onPaste: @escaping (ClipContent) -> Void) {
         self.store = store
         self.thumbnails = thumbnails
         self.onPaste = onPaste
@@ -274,6 +274,7 @@ final class PanelController: NSObject {
     func hide() {
         panel.orderOut(nil)
         thumbnails.reset()
+        store.clearThumbnails()
         // Drop cached rows and preview text; the next show reads fresh data anyway.
         rowCount = 0
         pages = [:]
@@ -406,23 +407,33 @@ final class PanelController: NSObject {
         panel.contentView?.layoutSubtreeIfNeeded()
     }
 
-    /// Shows the preview card next to the list when the selected clip doesn't fit its row.
+    /// Shows the preview card beside the row for truncated text or an image.
     private func updatePreview() {
         let row = tableView.selectedRow
-        guard let clip = clip(at: row), isTruncated(clip, row: row),
-              let loaded = logged("Load preview", { try store.excerpt(of: clip.id, limit: PreviewCard.characterLimit) }),
-              let excerpt = loaded
-        else {
-            if previewFrame != nil {
-                previewFrame = nil
-                previewCard.clear()
-                layoutWindow()
-            }
-            return
+        guard let clip = clip(at: row) else { hidePreview(); return }
+        let height: CGFloat
+        if clip.image != nil {
+            guard let loaded = logged("Load image preview", { try store.imageData(of: clip.id) }),
+                  let image = loaded
+            else { hidePreview(); return }
+            height = previewCard.showImage(image.data, size: image.size, byteCount: image.byteCount,
+                                           usedAt: image.usedAt, maxHeight: Self.maxPreviewHeight)
+        } else {
+            guard isTruncated(clip, row: row),
+                  let loaded = logged("Load preview", { try store.excerpt(of: clip.id, limit: PreviewCard.characterLimit) }),
+                  let excerpt = loaded
+            else { hidePreview(); return }
+            height = previewCard.show(excerpt.text, length: excerpt.length, usedAt: excerpt.usedAt,
+                                      matching: query, maxHeight: Self.maxPreviewHeight)
         }
-        let height = previewCard.show(excerpt.text, length: excerpt.length, usedAt: excerpt.usedAt,
-                                     matching: query, maxHeight: Self.maxPreviewHeight)
         previewFrame = previewFrame(forRow: row, height: height)
+        layoutWindow()
+    }
+
+    private func hidePreview() {
+        guard previewFrame != nil else { return }
+        previewFrame = nil
+        previewCard.clear()
         layoutWindow()
     }
 
@@ -476,7 +487,7 @@ final class PanelController: NSObject {
     /// Width the row's text label gets.
     private func textWidth(for clip: Clip, row: Int) -> CGFloat {
         var width = tableView.frameOfCell(atColumn: 0, row: row).width - ClipCellView.textPadding
-        if let link = clip.link, thumbnails.hasImage(for: link) {
+        if clip.image != nil || (clip.link.map(thumbnails.hasImage(for:)) ?? false) {
             width -= ThumbnailCache.size.width + ClipCellView.spacing
         }
         if let accessory = accessory(for: row) {
@@ -542,7 +553,9 @@ final class PanelController: NSObject {
 
     /// Height of a row: rows that show a thumbnail right of the text are taller.
     private func rowHeight(at row: Int) -> CGFloat {
-        guard let link = clip(at: row)?.link, thumbnails.hasImage(for: link) else { return Self.rowHeight }
+        guard let clip = clip(at: row) else { return Self.rowHeight }
+        if clip.image != nil { return ClipCellView.imageRowHeight }
+        guard let link = clip.link, thumbnails.hasImage(for: link) else { return Self.rowHeight }
         return ClipCellView.imageRowHeight
     }
 
@@ -699,9 +712,9 @@ final class PanelController: NSObject {
         guard let clip = clip(at: row) else { return }
         switch list {
         case .history:
-            guard let loaded = logged("Load clip text", { try store.text(of: clip.id) }), let text = loaded else { return }
+            guard let loaded = logged("Load clip content", { try store.content(of: clip.id) }), let content = loaded else { return }
             hide()
-            onPaste(text)
+            onPaste(content)
         case .trash:
             logged("Restore clip") { try store.restore(clip.id) }
             reload(selecting: row)
@@ -811,9 +824,13 @@ extension PanelController: NSTableViewDataSource, NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let cell = tableView.makeView(withIdentifier: ClipCellView.identifier, owner: nil) as? ClipCellView ?? ClipCellView()
         let clip = clip(at: row)
+        let thumbnail: NSImage? = clip.flatMap { clip in
+            clip.image.map { store.thumbnail(digest: $0, size: ThumbnailCache.size) }
+                ?? clip.link.flatMap(thumbnails.image(for:))
+        } ?? nil
         cell.configure(
             text: clip.map { display($0, row: row).text } ?? RowText(string: ""),
-            thumbnail: clip?.link.flatMap(thumbnails.image(for:)),
+            thumbnail: thumbnail,
             accessory: accessory(for: row)
         )
         return cell

@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 import SQLite3
-import CoreGraphics
+import AppKit
 
 /// One row as shown in the panel list. The full text is loaded only when pasting or previewing.
 struct Clip: Equatable {
@@ -46,12 +46,15 @@ final class ClipStore {
 
     private let db: OpaquePointer
     private let images: ImageStorage
+    /// Downscaled row thumbnails; only visible images stay in memory, and the panel clears it.
+    private let thumbnails = NSCache<NSData, NSImage>()
     // SQLITE_TRANSIENT: SQLite copies bound text and blobs before the call returns.
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     // The store lives for the whole process, so the connection is never closed explicitly.
     init(url: URL, images: ImageStorage) throws {
         self.images = images
+        thumbnails.countLimit = 32
         var handle: OpaquePointer?
         let rc = sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil)
         guard rc == SQLITE_OK, let handle else {
@@ -275,13 +278,26 @@ final class ClipStore {
         var content: ClipContent?
         try run("SELECT text, image, image_width, image_height FROM clips WHERE id = ?", [.int(id)]) { statement in
             if let digest = Self.blob(statement, 1), let data = self.images.data(digest: digest) {
-                let size = Self.imageSize(statement, 2, 3) ?? .zero
-                content = .image(data, size)
+                content = .image(data, Self.imageSize(statement, 2, 3) ?? .zero)
             } else {
                 content = .text(Self.string(statement, 0) ?? "")
             }
         }
         return content
+    }
+
+    /// A downscaled image for a list row. The 32-byte hash, not the PNG data, keys the cache.
+    func thumbnail(digest: Data, size: CGSize) -> NSImage? {
+        let key = digest as NSData
+        if let cached = thumbnails.object(forKey: key) { return cached }
+        guard let image = images.thumbnail(digest: digest, size: size) else { return nil }
+        thumbnails.setObject(image, forKey: key)
+        return image
+    }
+
+    /// Drops decoded row thumbnails when the panel closes. Disk files stay cached.
+    func clearThumbnails() {
+        thumbnails.removeAllObjects()
     }
 
     /// Returns at most `limit` characters of the clip's text, its total length in characters,
@@ -294,10 +310,15 @@ final class ClipStore {
         return excerpt
     }
 
-    func text(of id: Int64) throws -> String? {
-        var text: String?
-        try run("SELECT text FROM clips WHERE id = ?", [.int(id)]) { text = Self.string($0, 0) }
-        return text
+    /// Image clip preview: PNG bytes, pixel size, copy time, and the file's byte count.
+    func imageData(of id: Int64) throws -> (data: Data, size: CGSize, byteCount: Int, usedAt: Date)? {
+        var result: (Data, CGSize, Int, Date)?
+        try run("SELECT image, image_width, image_height, used_at FROM clips WHERE id = ?", [.int(id)]) { statement in
+            guard let digest = Self.blob(statement, 0), let data = self.images.data(digest: digest) else { return }
+            result = (data, Self.imageSize(statement, 1, 2) ?? .zero, data.count,
+                      Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)))
+        }
+        return result
     }
 
     /// Trigram search needs at least three characters; shorter queries fall back to a substring scan.

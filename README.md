@@ -1,16 +1,18 @@
 # PasteClip
 
-A minimal clipboard history app for macOS. It lives in the menu bar, keeps a plain-text history, and pastes the clip you pick into the frontmost app.
+A minimal clipboard history app for macOS. It lives in the menu bar, keeps a text and image history, and pastes the clip you pick into the frontmost app.
 
 Requires macOS 26.
 
 ## Features
 
-- Records plain-text copies. History has no size limit.
+- Records plain-text and image copies; when a copy has both, the text wins. History has no size limit.
 - Opens a Liquid Glass panel at the mouse position with a global shortcut (default ⇧⌘V, configurable in Settings).
 - Full-text search, including Chinese.
 - Shows a thumbnail for web links and the cover for YouTube links.
+- Keeps the original image as PNG; GIFs keep only their first frame. Image rows show a thumbnail and `图片 宽×高`, which is searchable.
 - Deleted clips go to a trash and are removed for good after 30 days.
+- Image files are removed when their last clip is deleted for good.
 - Skips clips marked as concealed or transient by password managers.
 
 ## Keyboard

@@ -7,15 +7,24 @@ final class PasteboardMonitor {
         NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"),
         NSPasteboard.PasteboardType("org.nspasteboard.TransientType"),
     ]
+    /// Image flavors to try in order. A text flavor wins over any of them.
+    private static let imageTypes: [NSPasteboard.PasteboardType] = [
+        .png, .tiff,
+        NSPasteboard.PasteboardType("public.jpeg"), NSPasteboard.PasteboardType("public.heic"),
+        NSPasteboard.PasteboardType("com.compuserve.gif"),
+    ]
 
     private let pasteboard = NSPasteboard.general
     private let onText: (String) -> Void
+    private let onImage: (Data) -> Void
     private let onAccessDenied: () -> Void
     private var changeCount: Int
     private var timer: Timer?
 
-    init(onText: @escaping (String) -> Void, onAccessDenied: @escaping () -> Void) {
+    init(onText: @escaping (String) -> Void, onImage: @escaping (Data) -> Void,
+         onAccessDenied: @escaping () -> Void) {
         self.onText = onText
+        self.onImage = onImage
         self.onAccessDenied = onAccessDenied
         changeCount = pasteboard.changeCount
     }
@@ -50,9 +59,23 @@ final class PasteboardMonitor {
             return
         }
         // Skip items marked as concealed or transient before reading their contents.
-        guard let types = pasteboard.types, Self.ignoredTypes.isDisjoint(with: types),
-              let text = pasteboard.string(forType: .string)
-        else { return }
-        onText(text)
+        guard let types = pasteboard.types, Self.ignoredTypes.isDisjoint(with: types) else { return }
+        // A plain-text flavor takes priority, so copying an image together with its URL
+        // still records the text, as before.
+        if let text = pasteboard.string(forType: .string) {
+            onText(text)
+            return
+        }
+        for type in Self.imageTypes {
+            guard let data = pasteboard.data(forType: type) else { continue }
+            onImage(data)
+            return
+        }
+        // Some apps declare a single image flavor under a less common UTI.
+        for type in types where type.rawValue.hasPrefix("public.") || type.rawValue == "com.compuserve.gif" {
+            guard let data = pasteboard.data(forType: type) else { continue }
+            onImage(data)
+            return
+        }
     }
 }

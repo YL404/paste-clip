@@ -4,12 +4,21 @@ import Carbon.HIToolbox
 enum Paster {
     static var isTrusted: Bool { AXIsProcessTrusted() }
 
-    /// Puts `text` on the pasteboard and sends ⌘V to the frontmost app.
-    /// Without Accessibility permission the text stays on the pasteboard for a manual paste.
-    static func paste(_ text: String) {
+    /// Puts `content` on the pasteboard and sends ⌘V to the frontmost app.
+    /// Without Accessibility permission the content stays on the pasteboard for a manual paste.
+    static func paste(_ content: ClipContent) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        switch content {
+        case .text(let text):
+            pasteboard.setString(text, forType: .string)
+        case .image(let data, _):
+            // Some apps only read TIFF; write both flavors from the same PNG data.
+            pasteboard.setData(data, forType: .png)
+            if let image = NSImage(data: data) {
+                pasteboard.setData(image.tiffRepresentation, forType: .tiff)
+            }
+        }
 
         guard isTrusted else {
             AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
