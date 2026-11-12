@@ -19,9 +19,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let store: ClipStore
+        let images: ImageStorage
         let thumbnails: ThumbnailCache
         do {
-            store = try ClipStore(url: Self.databaseURL())
+            images = try ImageStorage()
+            store = try ClipStore(url: Self.databaseURL(), images: images)
             thumbnails = try ThumbnailCache()
         } catch {
             NSApp.activate()
