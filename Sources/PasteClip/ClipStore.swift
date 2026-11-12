@@ -46,15 +46,13 @@ final class ClipStore {
 
     private let db: OpaquePointer
     private let images: ImageStorage
-    /// Downscaled row thumbnails; only visible images stay in memory, and the panel clears it.
-    private let thumbnails = NSCache<NSData, NSImage>()
+    private let imagesCache = ImageThumbnailCache()
     // SQLITE_TRANSIENT: SQLite copies bound text and blobs before the call returns.
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     // The store lives for the whole process, so the connection is never closed explicitly.
     init(url: URL, images: ImageStorage) throws {
         self.images = images
-        thumbnails.countLimit = 32
         var handle: OpaquePointer?
         let rc = sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil)
         guard rc == SQLITE_OK, let handle else {
@@ -288,17 +286,11 @@ final class ClipStore {
 
     /// A downscaled image for a list row. The 32-byte hash, not the PNG data, keys the cache.
     func thumbnail(digest: Data, size: CGSize) -> NSImage? {
-        let key = digest as NSData
-        if let cached = thumbnails.object(forKey: key) { return cached }
-        guard let image = images.thumbnail(digest: digest, size: size) else { return nil }
-        thumbnails.setObject(image, forKey: key)
-        return image
+        imagesCache.image(digest: digest, size: size, using: images)
     }
 
     /// Drops decoded row thumbnails when the panel closes. Disk files stay cached.
-    func clearThumbnails() {
-        thumbnails.removeAllObjects()
-    }
+    func clearThumbnails() { imagesCache.clear() }
 
     /// Returns at most `limit` characters of the clip's text, its total length in characters,
     /// and when it was last copied.

@@ -11,7 +11,6 @@ struct ClipImage {
     let width: Int
     let height: Int
     var digest: Data {
-        /// The file name is computed from the same bytes that are stored.
         Data(SHA256.hash(data: png))
     }
     var searchText: String { "图片 \(width)×\(height)" }
@@ -31,6 +30,23 @@ struct ClipImage {
         width = cgImage.width
         height = cgImage.height
     }
+}
+
+/// Decoded row thumbnails. The panel clears this cache when it closes; disk copies survive.
+final class ImageThumbnailCache {
+    private let cache = NSCache<NSData, NSImage>()
+
+    init() { cache.countLimit = 32 }
+
+    func image(digest: Data, size: CGSize, using storage: ImageStorage) -> NSImage? {
+        let key = digest as NSData
+        if let cached = cache.object(forKey: key) { return cached }
+        guard let image = storage.thumbnail(digest: digest, size: size) else { return nil }
+        cache.setObject(image, forKey: key)
+        return image
+    }
+
+    func clear() { cache.removeAllObjects() }
 }
 
 /// The original PNGs behind image clips, stored outside the SQLite database so a page
