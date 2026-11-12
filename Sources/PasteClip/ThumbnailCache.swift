@@ -25,6 +25,11 @@ final class ThumbnailCache {
         memory.countLimit = 32
     }
 
+    /// Whether the thumbnail is already cached. Starts no download and decodes nothing.
+    func hasImage(for link: URL) -> Bool {
+        memory.object(forKey: link as NSURL) != nil || FileManager.default.fileExists(atPath: fileURL(for: link).path)
+    }
+
     /// Returns the cached thumbnail, or nil and starts fetching it. `onLoad` fires when it arrives.
     func image(for link: URL) -> NSImage? {
         if let image = memory.object(forKey: link as NSURL) {
@@ -73,13 +78,15 @@ final class ThumbnailCache {
 
     private func fileURL(for link: URL) -> URL {
         let digest = SHA256.hash(data: Data(link.absoluteString.utf8))
-        return directory.appending(path: digest.map { String(format: "%02x", $0) }.joined() + ".png")
+        // The size is part of the name, so images cropped for an older layout are never shown.
+        let name = digest.map { String(format: "%02x", $0) }.joined() + "-\(Int(Self.size.width))x\(Int(Self.size.height))"
+        return directory.appending(path: name + ".png")
     }
 }
 
 /// Network and image work for thumbnails. Runs off the main actor.
 nonisolated enum ThumbnailDownloader {
-    static let size = CGSize(width: 48, height: 27)
+    static let size = CGSize(width: 96, height: 54)
 
     enum Result {
         case saved, failed, networkError, cancelled
