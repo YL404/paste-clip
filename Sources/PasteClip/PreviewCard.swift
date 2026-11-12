@@ -19,6 +19,7 @@ final class PreviewCard: NSGlassEffectView {
     private static let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
     private static let textInset = NSSize(width: 12, height: 10)
     private static let footerHeight: CGFloat = 28
+    private static let matchColor = NSColor.systemYellow.withAlphaComponent(0.4)
 
     private let textView = PreviewTextView()
     private let footer = NSTextField(labelWithString: "")
@@ -73,8 +74,19 @@ final class PreviewCard: NSGlassEffectView {
 
     /// Shows `text`, whose full length is `length` characters, and returns the card height
     /// that fits it, capped at `maxHeight`.
-    func show(_ text: String, length: Int, usedAt: Date, maxHeight: CGFloat) -> CGFloat {
-        textView.string = text
+    func show(_ text: String, length: Int, usedAt: Date, matching term: String, maxHeight: CGFloat) -> CGFloat {
+        let attributed = NSMutableAttributedString(string: text, attributes: [
+            .font: Self.font, .foregroundColor: NSColor.labelColor,
+        ])
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            var start = text.startIndex
+            while let range = text.range(of: trimmed, options: .caseInsensitive, range: start..<text.endIndex) {
+                attributed.addAttribute(.backgroundColor, value: Self.matchColor, range: NSRange(range, in: text))
+                start = range.upperBound
+            }
+        }
+        textView.textStorage?.setAttributedString(attributed)
         textView.scroll(.zero)
         let size = length > Self.characterLimit
             ? "共 \(length.formatted()) 字，仅显示前 \(Self.characterLimit.formatted()) 字"
@@ -94,7 +106,7 @@ final class PreviewCard: NSGlassEffectView {
 
     /// Releases the shown text.
     func clear() {
-        textView.string = ""
+        textView.textStorage?.setAttributedString(NSAttributedString())
     }
 
     /// Copies the selected preview text. Returns false when nothing is selected.

@@ -5,7 +5,7 @@ nonisolated struct RowText: Equatable {
     var string: String
     /// Start of the trailing part drawn in a secondary color, such as a link's path.
     var dimmedFrom: Int?
-    /// Search matches, drawn in bold.
+    /// Search matches, drawn with a yellow highlighter background.
     var matches: [NSRange] = []
 
     /// A link without its scheme, with everything after the host dimmed.

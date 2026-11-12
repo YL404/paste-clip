@@ -80,7 +80,9 @@ private final class ClipRowView: NSTableRowView {
 private final class ClipCellView: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("ClipCell")
     static let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
-    static let matchFont = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .bold)
+    /// A translucent highlighter; weaker on selected rows so it doesn't muddy the selection color.
+    static let matchColor = NSColor.systemYellow.withAlphaComponent(0.4)
+    static let emphasizedMatchColor = NSColor.systemYellow.withAlphaComponent(0.2)
     /// Space between the cell edge and the label's drawn text, measured from the laid-out cell.
     static let textPadding: CGFloat = 4
     static let spacing: CGFloat = 8
@@ -135,6 +137,7 @@ private final class ClipCellView: NSTableCellView {
 
     static func attributedText(_ text: RowText, emphasized: Bool) -> NSAttributedString {
         let primary: NSColor = emphasized ? .alternateSelectedControlTextColor : .labelColor
+        let highlight = emphasized ? emphasizedMatchColor : matchColor
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
         let result = NSMutableAttributedString(string: text.string, attributes: [
@@ -145,7 +148,7 @@ private final class ClipCellView: NSTableCellView {
             result.addAttribute(.foregroundColor, value: secondary, range: NSRange(location: dimmedFrom, length: result.length - dimmedFrom))
         }
         for match in text.matches {
-            result.addAttribute(.font, value: matchFont, range: match)
+            result.addAttribute(.backgroundColor, value: highlight, range: match)
         }
         return result
     }
@@ -417,7 +420,8 @@ final class PanelController: NSObject {
             }
             return
         }
-        let height = previewCard.show(excerpt.text, length: excerpt.length, usedAt: excerpt.usedAt, maxHeight: Self.maxPreviewHeight)
+        let height = previewCard.show(excerpt.text, length: excerpt.length, usedAt: excerpt.usedAt,
+                                     matching: query, maxHeight: Self.maxPreviewHeight)
         previewFrame = previewFrame(forRow: row, height: height)
         layoutWindow()
     }
