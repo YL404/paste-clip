@@ -7,8 +7,6 @@ struct Clip: Equatable {
     let id: Int64
     let preview: String
     let link: URL?
-    /// The one-line preview leaves out text: line breaks or anything past the preview length.
-    let isAbridged: Bool
     /// When the clip was moved to the trash; nil in the history.
     let deletedAt: Date?
     /// One line of text around the first search match, starting with "…" when it doesn't start
@@ -152,11 +150,9 @@ final class ClipStore {
         clips.reserveCapacity(limit)
         // The page is picked first with only ids and match positions, so SQLite never holds
         // the texts of a whole page at once.
-        // The preview is the trimmed text with whitespace runs collapsed, so any difference after
-        // trimming means line breaks or truncation.
         try run(
             """
-            SELECT c.id, c.preview, c.link, trim(c.text, char(32, 9, 10, 13)) <> c.preview, c.deleted_at, p.position,
+            SELECT c.id, c.preview, c.link, c.deleted_at, p.position,
                 CASE WHEN p.position > 0 THEN substr(c.text, max(1, p.position - \(Self.matchLead)), \(Self.excerptLength)) END
             FROM (
                 SELECT id, \(order) AS sort, \(position) AS position FROM clips
@@ -167,16 +163,15 @@ final class ClipStore {
             """,
             (term.isEmpty ? [] : [.text(term)]) + values + [.int(Int64(limit)), .int(Int64(offset))]
         ) { statement in
-            let excerpt = Self.string(statement, 6).map { raw in
+            let excerpt = Self.string(statement, 5).map { raw in
                 let line = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-                return sqlite3_column_int64(statement, 5) > Int64(Self.matchLead + 1) ? "…" + line : line
+                return sqlite3_column_int64(statement, 4) > Int64(Self.matchLead + 1) ? "…" + line : line
             }
             clips.append(Clip(
                 id: sqlite3_column_int64(statement, 0),
                 preview: Self.string(statement, 1) ?? "",
                 link: Self.string(statement, 2).flatMap(URL.init(string:)),
-                isAbridged: sqlite3_column_int(statement, 3) != 0,
-                deletedAt: Self.date(statement, 4),
+                deletedAt: Self.date(statement, 3),
                 matchExcerpt: excerpt
             ))
         }

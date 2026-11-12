@@ -81,12 +81,17 @@ private final class ClipCellView: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("ClipCell")
     static let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
     static let matchFont = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .bold)
-    /// Horizontal space the cell uses around the text: stack insets plus the label's own padding.
-    static let textPadding: CGFloat = 12
+    /// Space between the cell edge and the label's drawn text, measured from the laid-out cell.
+    static let textPadding: CGFloat = 4
     static let spacing: CGFloat = 8
     static let accessoryFont = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+    /// Gap between the row edge and the thumbnail.
+    static let imageInset: CGFloat = 4
+    /// Height of a row whose thumbnail sits right of the text.
+    static let imageRowHeight = imageInset + ThumbnailCache.size.height + imageInset
 
     private let accessoryLabel = NSTextField(labelWithString: "")
+    private let thumbnailView = NSImageView()
 
     init() {
         super.init(frame: .zero)
@@ -103,34 +108,29 @@ private final class ClipCellView: NSTableCellView {
         // The text stretches, so the accessory sits at the trailing edge.
         label.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
 
-        let thumbnail = NSImageView()
-        thumbnail.imageScaling = .scaleAxesIndependently
-        thumbnail.wantsLayer = true
-        thumbnail.layer?.cornerRadius = 4
-        thumbnail.layer?.masksToBounds = true
-        NSLayoutConstraint.activate([
-            thumbnail.widthAnchor.constraint(equalToConstant: ThumbnailCache.size.width),
-            thumbnail.heightAnchor.constraint(equalToConstant: ThumbnailCache.size.height),
-        ])
+        thumbnailView.imageScaling = .scaleAxesIndependently
+        thumbnailView.wantsLayer = true
+        thumbnailView.layer?.cornerRadius = 6
+        thumbnailView.layer?.masksToBounds = true
 
-        // Hidden views are detached from the stack, so rows without a thumbnail start with text.
-        let stack = NSStackView(views: [thumbnail, label, accessoryLabel])
+        // Hidden views are detached from the stack, so rows without a thumbnail end with the text.
+        let stack = NSStackView(views: [label, accessoryLabel, thumbnailView])
         stack.spacing = Self.spacing
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         textField = label
-        imageView = thumbnail
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            thumbnailView.widthAnchor.constraint(equalToConstant: ThumbnailCache.size.width),
+            thumbnailView.heightAnchor.constraint(equalToConstant: ThumbnailCache.size.height),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.imageInset),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.imageInset),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
     /// Width the accessory takes from the text, including the spacing before it.
     static func accessoryWidth(_ accessory: String) -> CGFloat {
-        // The extra 4 points cover the label's own padding.
-        (accessory as NSString).size(withAttributes: [.font: accessoryFont]).width.rounded(.up) + 4 + spacing
+        (accessory as NSString).size(withAttributes: [.font: accessoryFont]).width.rounded(.up) + spacing
     }
 
     static func attributedText(_ text: RowText, emphasized: Bool) -> NSAttributedString {
@@ -156,8 +156,8 @@ private final class ClipCellView: NSTableCellView {
     func configure(text: RowText, thumbnail: NSImage?, accessory: String?) {
         self.text = text
         textField?.attributedStringValue = Self.attributedText(text, emphasized: backgroundStyle == .emphasized)
-        imageView?.image = thumbnail
-        imageView?.isHidden = thumbnail == nil
+        thumbnailView.image = thumbnail
+        thumbnailView.isHidden = thumbnail == nil
         accessoryLabel.stringValue = accessory ?? ""
         accessoryLabel.isHidden = accessory == nil
     }
@@ -328,6 +328,11 @@ final class PanelController: NSObject {
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(listScrolled),
+            name: NSView.boundsDidChangeNotification, object: scrollView.contentView
+        )
 
         emptyLabel.textColor = .secondaryLabelColor
         emptyLabel.alignment = .center
@@ -413,14 +418,32 @@ final class PanelController: NSObject {
             return
         }
         let height = previewCard.show(excerpt.text, length: excerpt.length, usedAt: excerpt.usedAt, maxHeight: Self.maxPreviewHeight)
+        previewFrame = previewFrame(forRow: row, height: height)
+        layoutWindow()
+    }
+
+    /// Frame of the preview card beside the row, clamped to the screen.
+    private func previewFrame(forRow row: Int, height: CGFloat) -> NSRect? {
+        guard row >= 0, row < rowCount else { return nil }
+        let rowInWindow = tableView.convert(tableView.rect(ofRow: row), to: nil)
+        let rowOnScreen = panel.convertToScreen(rowInWindow)
         // Right of the list, or left when the screen has no room on the right.
-        var frame = NSRect(x: cardFrame.maxX + Self.previewGap, y: cardFrame.maxY - height,
+        var frame = NSRect(x: cardFrame.maxX + Self.previewGap, y: rowOnScreen.maxY - height,
                            width: PreviewCard.width, height: height)
         if frame.maxX > visibleFrame.maxX {
             frame.origin.x = cardFrame.minX - Self.previewGap - frame.width
         }
-        frame.origin.y = max(frame.minY, visibleFrame.minY)
-        previewFrame = frame
+        frame.origin.y = min(max(frame.minY, visibleFrame.minY), visibleFrame.maxY - frame.height)
+        return frame
+    }
+
+    /// Keeps the card beside its row when the list scrolls under it.
+    @objc private func listScrolled() {
+        guard let shown = previewFrame,
+              let moved = previewFrame(forRow: tableView.selectedRow, height: shown.height),
+              moved != shown
+        else { return }
+        previewFrame = moved
         layoutWindow()
     }
 
@@ -443,13 +466,13 @@ final class PanelController: NSObject {
                 return (RowText(string: excerpt).highlighting(term), true)
             }
         }
-        return (text, clip.isAbridged || attributed.size().width > width)
+        return (text, attributed.size().width > width)
     }
 
     /// Width the row's text label gets.
     private func textWidth(for clip: Clip, row: Int) -> CGFloat {
         var width = tableView.frameOfCell(atColumn: 0, row: row).width - ClipCellView.textPadding
-        if let link = clip.link, thumbnails.image(for: link) != nil {
+        if let link = clip.link, thumbnails.hasImage(for: link) {
             width -= ThumbnailCache.size.width + ClipCellView.spacing
         }
         if let accessory = accessory(for: row) {
@@ -506,7 +529,6 @@ final class PanelController: NSObject {
         updatePreview()
     }
 
-    private var rowStride: CGFloat { Self.rowHeight + tableView.intercellSpacing.height }
     /// Card height outside the row area.
     private var chromeHeight: CGFloat {
         Self.searchHeight + (isBannerVisible ? Self.bannerHeight : 0) + Self.footerHeight
@@ -514,15 +536,31 @@ final class PanelController: NSObject {
 
     private var isBannerVisible: Bool { banner?.view.isHidden == false }
 
-    private func listHeight(rows: Int) -> CGFloat {
-        CGFloat(rows) * rowStride + Self.tableInsets
+    /// Height of a row: rows that show a thumbnail right of the text are taller.
+    private func rowHeight(at row: Int) -> CGFloat {
+        guard let link = clip(at: row)?.link, thumbnails.hasImage(for: link) else { return Self.rowHeight }
+        return ClipCellView.imageRowHeight
+    }
+
+    /// Height of a full compact list, the panel's default size. Thumbnail rows make it show fewer rows.
+    private var defaultListHeight: CGFloat {
+        CGFloat(Self.defaultVisibleRows) * (Self.rowHeight + tableView.intercellSpacing.height) + Self.tableInsets
+    }
+
+    private func listHeight(rows: Int, upTo limit: CGFloat = .greatestFiniteMagnitude) -> CGFloat {
+        var height = Self.tableInsets
+        for row in 0..<rows {
+            height += rowHeight(at: row) + tableView.intercellSpacing.height
+            if height >= limit { break }
+        }
+        return height
     }
 
     /// Fits the card to the rows, up to the dragged height, keeping its top edge in place
     /// and the whole card on screen.
     private func updateCardFrame() {
-        let maxHeight = draggedListHeight ?? listHeight(rows: Self.defaultVisibleRows)
-        let height = min(chromeHeight + min(listHeight(rows: max(rowCount, 1)), maxHeight), visibleFrame.height)
+        let maxHeight = draggedListHeight ?? defaultListHeight
+        let height = min(chromeHeight + min(listHeight(rows: max(rowCount, 1), upTo: maxHeight), maxHeight), visibleFrame.height)
         var card = NSRect(x: cardFrame.minX, y: cardFrame.maxY - height, width: Self.width, height: height)
         card.origin.x = min(max(card.minX, visibleFrame.minX), visibleFrame.maxX - card.width)
         card.origin.y = min(max(card.minY, visibleFrame.minY), visibleFrame.maxY - card.height)
@@ -572,7 +610,12 @@ final class PanelController: NSObject {
         guard panel.isVisible else { return }
         let visible = tableView.rows(in: tableView.visibleRect)
         let rows = IndexSet((visible.lowerBound..<visible.upperBound).filter { clip(at: $0)?.link == link })
+        guard !rows.isEmpty else { return }
+        // The thumbnail makes the row taller, so its height and the card size change with it.
+        tableView.noteHeightOfRows(withIndexesChanged: rows)
         tableView.reloadData(forRowIndexes: rows, columnIndexes: IndexSet(integer: 0))
+        updateCardFrame()
+        updatePreview()
     }
 
     private func updateListAppearance() {
@@ -748,6 +791,10 @@ extension PanelController: NSTableViewDataSource, NSTableViewDelegate {
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         ClipRowView()
+    }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        rowHeight(at: row)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
