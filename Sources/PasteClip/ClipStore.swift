@@ -8,6 +8,8 @@ struct Clip: Equatable {
     let id: Int64
     let preview: String
     let link: URL?
+    /// The one-line preview leaves out text: line breaks or anything past the preview length.
+    let isAbridged: Bool
     /// nil for a text clip; the SHA256 of the stored PNG for an image clip.
     let image: Data?
     let imageSize: CGSize?
@@ -96,11 +98,10 @@ final class ClipStore {
         try rebuildFTSIfNeeded()
         try exec("""
             CREATE TRIGGER IF NOT EXISTS clips_after_insert AFTER INSERT ON clips BEGIN
-                INSERT INTO clips_fts(rowid, text) SELECT new.id, new.text WHERE new.kind = 0;
+                INSERT INTO clips_fts(rowid, text) VALUES (new.id, new.text);
             END;
             CREATE TRIGGER IF NOT EXISTS clips_after_delete AFTER DELETE ON clips BEGIN
-                INSERT INTO clips_fts(clips_fts, rowid, text)
-                    SELECT 'delete', old.id, old.text WHERE old.kind = 0;
+                INSERT INTO clips_fts(clips_fts, rowid, text) VALUES ('delete', old.id, old.text);
             END;
             """)
         try pruneImageFiles()
@@ -120,17 +121,23 @@ final class ClipStore {
         }
     }
 
-    /// An FTS table created by an older build has no indexed rows. `rebuild` reads the
-    /// content table directly, so it only needs to run once per database.
+    /// An FTS table created by an older build may miss text or image rows. `rebuild` reads
+    /// the content table directly, so it only needs to run once per schema version.
     private func rebuildFTSIfNeeded() throws {
+        var version = 0
+        try run("PRAGMA user_version", [], row: { version = Int(sqlite3_column_int64($0, 0)) })
         var terms = 0
         try run("SELECT count(*) FROM clips_fts_idx", [], row: { terms = Int(sqlite3_column_int64($0, 0)) })
-        var texts = 0
-        try run("SELECT count(*) FROM clips WHERE kind = 0 AND length(text) >= 3", [], row: { texts = Int(sqlite3_column_int64($0, 0)) })
+        var indexable = 0
+        try run("SELECT count(*) FROM clips WHERE length(text) >= 3", [], row: { indexable = Int(sqlite3_column_int64($0, 0)) })
         // A database with only short texts also has an empty trigram index, so only
         // rebuild when there is something to index.
-        if terms == 0 && texts > 0 {
+        if indexable > 0 && (terms == 0 || version < 1) {
             try exec("INSERT INTO clips_fts(clips_fts) VALUES ('rebuild')")
+            sqlite3_db_release_memory(db)
+        }
+        if version < 1 {
+            try exec("PRAGMA user_version = 1")
         }
     }
 
@@ -155,8 +162,8 @@ final class ClipStore {
 
     /// Adds a copied image to the top of the history. The original PNG is written once and
     /// shared by any later clip with the same bytes, including one in the trash.
-    func record(_ image: ClipImage, usedAt: Date = Date()) throws {
-        let digest = try images.store(image)
+    func record(_ image: ClipImage, thumbnail: Data? = nil, thumbnailSize: CGSize = .zero, usedAt: Date = Date()) throws {
+        let digest = try images.store(image, thumbnail: thumbnail, thumbnailSize: thumbnailSize)
         let preview = image.searchText
         try run("""
             INSERT INTO clips (text, hash, preview, link, kind, image, image_width, image_height, used_at)
@@ -178,7 +185,8 @@ final class ClipStore {
         try transaction {
             try run("""
                 UPDATE clips SET used_at = ?
-                WHERE deleted_at IS NULL AND hash = (SELECT hash FROM clips WHERE id = ? AND deleted_at IS NOT NULL)
+                WHERE deleted_at IS NULL
+                  AND (kind, hash) = (SELECT kind, hash FROM clips WHERE id = ? AND deleted_at IS NOT NULL)
                 """, .real(now()), .int(id))
             if sqlite3_changes(db) > 0 {
                 try run("DELETE FROM clips WHERE id = ?", .int(id))
@@ -241,9 +249,12 @@ final class ClipStore {
         clips.reserveCapacity(limit)
         // The page is picked first with only ids and match positions, so SQLite never holds
         // the texts of a whole page at once.
+        // The preview is the trimmed text with whitespace runs collapsed, so any difference after
+        // trimming means line breaks or truncation.
         try run(
             """
-            SELECT c.id, c.preview, c.link, c.image, c.image_width, c.image_height, c.deleted_at, p.position,
+            SELECT c.id, c.preview, c.link, c.kind = 0 AND trim(c.text, char(32, 9, 10, 13)) <> c.preview,
+                c.image, c.image_width, c.image_height, c.deleted_at, p.position,
                 CASE WHEN p.position > 0 THEN substr(c.text, max(1, p.position - \(Self.matchLead)), \(Self.excerptLength)) END
             FROM (
                 SELECT id, \(order) AS sort, \(position) AS position FROM clips
@@ -254,17 +265,18 @@ final class ClipStore {
             """,
             (term.isEmpty ? [] : [.text(term)]) + values + [.int(Int64(limit)), .int(Int64(offset))]
         ) { statement in
-            let excerpt = Self.string(statement, 8).map { raw in
+            let excerpt = Self.string(statement, 9).map { raw in
                 let line = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-                return sqlite3_column_int64(statement, 7) > Int64(Self.matchLead + 1) ? "…" + line : line
+                return sqlite3_column_int64(statement, 8) > Int64(Self.matchLead + 1) ? "…" + line : line
             }
             clips.append(Clip(
                 id: sqlite3_column_int64(statement, 0),
                 preview: Self.string(statement, 1) ?? "",
                 link: Self.string(statement, 2).flatMap(URL.init(string:)),
-                image: Self.blob(statement, 3),
-                imageSize: Self.imageSize(statement, 4, 5),
-                deletedAt: Self.date(statement, 6),
+                isAbridged: sqlite3_column_int(statement, 3) != 0,
+                image: Self.blob(statement, 4),
+                imageSize: Self.imageSize(statement, 5, 6),
+                deletedAt: Self.date(statement, 7),
                 matchExcerpt: excerpt
             ))
         }
@@ -302,12 +314,13 @@ final class ClipStore {
         return excerpt
     }
 
-    /// Image clip preview: PNG bytes, pixel size, copy time, and the file's byte count.
-    func imageData(of id: Int64) throws -> (data: Data, size: CGSize, byteCount: Int, usedAt: Date)? {
-        var result: (Data, CGSize, Int, Date)?
+    /// Image clip preview: file-backed image, pixel size, byte count, and copy time.
+    func imagePreview(of id: Int64) throws -> (image: NSImage, size: CGSize, byteCount: Int, usedAt: Date)? {
+        var result: (NSImage, CGSize, Int, Date)?
         try run("SELECT image, image_width, image_height, used_at FROM clips WHERE id = ?", [.int(id)]) { statement in
-            guard let digest = Self.blob(statement, 0), let data = self.images.data(digest: digest) else { return }
-            result = (data, Self.imageSize(statement, 1, 2) ?? .zero, data.count,
+            guard let digest = Self.blob(statement, 0),
+                  let loaded = self.images.preview(digest: digest) else { return }
+            result = (loaded.image, Self.imageSize(statement, 1, 2) ?? .zero, loaded.byteCount,
                       Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)))
         }
         return result

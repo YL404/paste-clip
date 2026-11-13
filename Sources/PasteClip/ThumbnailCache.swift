@@ -1,7 +1,5 @@
 import AppKit
 import CryptoKit
-import ImageIO
-import UniformTypeIdentifiers
 
 /// Link thumbnails, downscaled to the list row size and cached on disk.
 /// Only the few images on screen are kept in memory, and only while the panel is open.
@@ -119,7 +117,7 @@ nonisolated enum ThumbnailDownloader {
                 imageURL = url
             }
             guard let (image, _) = try await fetch(imageURL, limit: maxImageBytes),
-                  let png = makeThumbnail(from: image)
+                  let png = ClipImage.thumbnailPNG(from: image, size: size)
             else { return .failed }
             try png.write(to: file, options: .atomic)
             return .saved
@@ -151,47 +149,5 @@ nonisolated enum ThumbnailDownloader {
             }
         }
         return (data, finalURL)
-    }
-
-    /// Scales and center-crops the image to the row thumbnail size at 2x, encoded as PNG to keep transparency.
-    static func makeThumbnail(from data: Data) -> Data? {
-        let width = Int(size.width * 2)
-        let height = Int(size.height * 2)
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-              let sourceWidth = properties[kCGImagePropertyPixelWidth] as? Int, sourceWidth > 0,
-              let sourceHeight = properties[kCGImagePropertyPixelHeight] as? Int, sourceHeight > 0
-        else { return nil }
-
-        // Decode only as many pixels as the crop needs, so large images never load at full size.
-        let scale = min(1, max(Double(width) / Double(sourceWidth), Double(height) / Double(sourceHeight)))
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: Int((Double(max(sourceWidth, sourceHeight)) * scale).rounded(.up)),
-        ]
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
-              let context = CGContext(
-                  data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
-                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-              )
-        else { return nil }
-
-        let fill = max(Double(width) / Double(image.width), Double(height) / Double(image.height))
-        let drawWidth = Double(image.width) * fill
-        let drawHeight = Double(image.height) * fill
-        context.interpolationQuality = .high
-        context.draw(image, in: CGRect(
-            x: (Double(width) - drawWidth) / 2, y: (Double(height) - drawHeight) / 2,
-            width: drawWidth, height: drawHeight
-        ))
-        guard let cropped = context.makeImage() else { return nil }
-
-        let output = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil)
-        else { return nil }
-        CGImageDestinationAddImage(destination, cropped, nil)
-        return CGImageDestinationFinalize(destination) ? output as Data : nil
     }
 }

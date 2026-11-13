@@ -165,6 +165,16 @@ private final class ClipCellView: NSTableCellView {
         accessoryLabel.isHidden = accessory == nil
     }
 
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        text = RowText(string: "")
+        textField?.attributedStringValue = NSAttributedString()
+        thumbnailView.image = nil
+        thumbnailView.isHidden = true
+        accessoryLabel.stringValue = ""
+        accessoryLabel.isHidden = true
+    }
+
     /// The attributed text carries its own colors, and the accessory sits inside the stack view,
     /// so both follow the selection style explicitly.
     override var backgroundStyle: NSView.BackgroundStyle {
@@ -193,7 +203,7 @@ final class PanelController: NSObject {
     private static let footerHeight: CGFloat = 26
     private static let bannerHeight: CGFloat = 30
     /// Space the inset table style adds above and below the rows.
-    private static let tableInsets: CGFloat = 10
+    private static let tableInsets: CGFloat = 20
     private static let pageSize = 50
     private static let maxCachedPages = 6
 
@@ -230,6 +240,7 @@ final class PanelController: NSObject {
     /// Card frames in screen coordinates. The window is sized around them.
     private var cardFrame = NSRect.zero
     private var previewFrame: NSRect?
+    private var isPreviewSuppressedByScroll = false
     private var visibleFrame = NSRect.zero
 
     init(store: ClipStore, thumbnails: ThumbnailCache, onPaste: @escaping (ClipContent) -> Void) {
@@ -280,7 +291,15 @@ final class PanelController: NSObject {
         pages = [:]
         tableView.reloadData()
         previewFrame = nil
+        isPreviewSuppressedByScroll = false
         previewCard.clear()
+    }
+
+    /// Refreshes the open history list when a background image write finishes.
+    func reloadIfVisible() {
+        guard panel.isVisible, list == .history else { return }
+        let row = max(tableView.selectedRow, 0)
+        reload(selecting: row)
     }
 
     // MARK: - Setup
@@ -409,14 +428,15 @@ final class PanelController: NSObject {
 
     /// Shows the preview card beside the row for truncated text or an image.
     private func updatePreview() {
+        isPreviewSuppressedByScroll = false
         let row = tableView.selectedRow
         guard let clip = clip(at: row) else { hidePreview(); return }
         let height: CGFloat
         if clip.image != nil {
-            guard let loaded = logged("Load image preview", { try store.imageData(of: clip.id) }),
+            guard let loaded = logged("Load image preview", { try store.imagePreview(of: clip.id) }),
                   let image = loaded
             else { hidePreview(); return }
-            height = previewCard.showImage(image.data, size: image.size, byteCount: image.byteCount,
+            height = previewCard.showImage(image.image, size: image.size, byteCount: image.byteCount,
                                            usedAt: image.usedAt, maxHeight: Self.maxPreviewHeight)
         } else {
             guard isTruncated(clip, row: row),
@@ -426,7 +446,12 @@ final class PanelController: NSObject {
             height = previewCard.show(excerpt.text, length: excerpt.length, usedAt: excerpt.usedAt,
                                       matching: query, maxHeight: Self.maxPreviewHeight)
         }
-        previewFrame = previewFrame(forRow: row, height: height)
+        let frame = previewFrame(forRow: row, height: height)
+        if frame == nil {
+            isPreviewSuppressedByScroll = true
+            previewCard.clear()
+        }
+        previewFrame = frame
         layoutWindow()
     }
 
@@ -437,13 +462,19 @@ final class PanelController: NSObject {
         layoutWindow()
     }
 
-    /// Frame of the preview card beside the row, clamped to the screen.
+    /// Frame of the preview card beside the row, or nil if the row is scrolled out of view.
     private func previewFrame(forRow row: Int, height: CGFloat) -> NSRect? {
         guard row >= 0, row < rowCount else { return nil }
-        let rowInWindow = tableView.convert(tableView.rect(ofRow: row), to: nil)
+        let rowRect = tableView.rect(ofRow: row)
+        let visibleRowsRect = tableView.visibleRect
+        guard visibleRowsRect.intersects(rowRect) else { return nil }
+        let rowInWindow = tableView.convert(rowRect, to: nil)
         let rowOnScreen = panel.convertToScreen(rowInWindow)
+        let scrollInWindow = tableView.convert(visibleRowsRect, to: nil)
+        let scrollOnScreen = panel.convertToScreen(scrollInWindow)
+        let anchorTop = min(max(rowOnScreen.maxY, scrollOnScreen.minY), scrollOnScreen.maxY)
         // Right of the list, or left when the screen has no room on the right.
-        var frame = NSRect(x: cardFrame.maxX + Self.previewGap, y: rowOnScreen.maxY - height,
+        var frame = NSRect(x: cardFrame.maxX + Self.previewGap, y: anchorTop - height,
                            width: PreviewCard.width, height: height)
         if frame.maxX > visibleFrame.maxX {
             frame.origin.x = cardFrame.minX - Self.previewGap - frame.width
@@ -454,10 +485,20 @@ final class PanelController: NSObject {
 
     /// Keeps the card beside its row when the list scrolls under it.
     @objc private func listScrolled() {
-        guard let shown = previewFrame,
-              let moved = previewFrame(forRow: tableView.selectedRow, height: shown.height),
-              moved != shown
-        else { return }
+        guard !isReloading else { return }
+        let row = tableView.selectedRow
+        if isPreviewSuppressedByScroll {
+            guard row >= 0, tableView.visibleRect.intersects(tableView.rect(ofRow: row)) else { return }
+            updatePreview()
+            return
+        }
+        guard let shown = previewFrame else { return }
+        guard let moved = previewFrame(forRow: row, height: shown.height) else {
+            isPreviewSuppressedByScroll = true
+            hidePreview()
+            return
+        }
+        guard moved != shown else { return }
         previewFrame = moved
         layoutWindow()
     }
@@ -478,10 +519,12 @@ final class PanelController: NSObject {
                 attributed.attributedSubstring(from: NSRange(location: 0, length: NSMaxRange($0))).size().width <= width
             } ?? false
             if !matchFits {
-                return (RowText(string: excerpt).highlighting(term), true)
+                let excerptText = RowText(string: excerpt).highlighting(term)
+                let excerptFits = ClipCellView.attributedText(excerptText, emphasized: false).size().width <= width
+                return (excerptText, clip.isAbridged || !excerptFits)
             }
         }
-        return (text, attributed.size().width > width)
+        return (text, clip.isAbridged || attributed.size().width > width)
     }
 
     /// Width the row's text label gets.
@@ -517,7 +560,13 @@ final class PanelController: NSObject {
         guard list == .history else { return }
         let visible = tableView.rows(in: tableView.visibleRect)
         tableView.reloadData(forRowIndexes: IndexSet(integersIn: visible.lowerBound..<visible.upperBound), columnIndexes: IndexSet(integer: 0))
-        updatePreview()
+        let selected = tableView.selectedRow
+        if selected >= 0, selected < 9, let clip = clip(at: selected), clip.image == nil {
+            let shouldShow = isTruncated(clip, row: selected)
+            if shouldShow != (previewFrame != nil || isPreviewSuppressedByScroll) {
+                shouldShow ? updatePreview() : hidePreview()
+            }
+        }
     }
 
     /// Returns focus to the search field without selecting its text, so typing continues.
@@ -531,6 +580,7 @@ final class PanelController: NSObject {
     private func reload(selecting row: Int = 0) {
         isReloading = true
         pages = [:]
+        isPreviewSuppressedByScroll = false
         rowCount = logged("Count clips") { try store.count(in: list, matching: query) } ?? 0
         tableView.reloadData()
         if rowCount > 0 {
@@ -625,14 +675,34 @@ final class PanelController: NSObject {
 
     private func reloadRows(showing link: URL) {
         guard panel.isVisible else { return }
-        let visible = tableView.rows(in: tableView.visibleRect)
-        let rows = IndexSet((visible.lowerBound..<visible.upperBound).filter { clip(at: $0)?.link == link })
+        var rows = IndexSet()
+        for (page, clips) in pages {
+            let base = page * Self.pageSize
+            for (offset, clip) in clips.enumerated() where clip.link == link {
+                rows.insert(base + offset)
+            }
+        }
         guard !rows.isEmpty else { return }
         // The thumbnail makes the row taller, so its height and the card size change with it.
         tableView.noteHeightOfRows(withIndexesChanged: rows)
         tableView.reloadData(forRowIndexes: rows, columnIndexes: IndexSet(integer: 0))
         updateCardFrame()
-        updatePreview()
+        let selected = tableView.selectedRow
+        if rows.contains(selected), let clip = clip(at: selected), clip.image == nil {
+            let shouldShow = isTruncated(clip, row: selected)
+            if shouldShow != (previewFrame != nil || isPreviewSuppressedByScroll) {
+                shouldShow ? updatePreview() : hidePreview()
+                return
+            }
+        }
+        if let shown = previewFrame {
+            previewFrame = previewFrame(forRow: selected, height: shown.height)
+            if previewFrame == nil {
+                isPreviewSuppressedByScroll = true
+                previewCard.clear()
+            }
+            layoutWindow()
+        }
     }
 
     private func updateListAppearance() {

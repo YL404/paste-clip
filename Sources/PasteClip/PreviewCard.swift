@@ -120,10 +120,10 @@ final class PreviewCard: NSGlassEffectView {
     }
 
     /// Shows the image itself, and returns the card height that fits it, capped at `maxHeight`.
-    func showImage(_ data: Data, size: CGSize, byteCount: Int, usedAt: Date, maxHeight: CGFloat) -> CGFloat {
+    func showImage(_ image: NSImage, size: CGSize, byteCount: Int, usedAt: Date, maxHeight: CGFloat) -> CGFloat {
         textScroll.isHidden = true
         imageView.isHidden = false
-        imageView.image = NSImage(data: data)
+        imageView.image = image
         let sizeText = "\(Int(size.width))×\(Int(size.height))"
         let bytes = byteCount.formatted(.byteCount(style: .file, allowedUnits: [.kb, .mb], spellsOutZero: false))
         footer.stringValue = "复制于 \(usedAt.formatted(.relative(presentation: .named))) · \(sizeText) · \(bytes)"

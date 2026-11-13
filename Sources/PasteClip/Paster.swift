@@ -15,8 +15,8 @@ enum Paster {
         case .image(let data, _):
             // Some apps only read TIFF; write both flavors from the same PNG data.
             pasteboard.setData(data, forType: .png)
-            if let image = NSImage(data: data) {
-                pasteboard.setData(image.tiffRepresentation, forType: .tiff)
+            if let tiff = NSImage(data: data)?.tiffRepresentation {
+                pasteboard.setData(tiff, forType: .tiff)
             }
         }
 

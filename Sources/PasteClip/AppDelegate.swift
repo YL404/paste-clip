@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var panel: PanelController?
     private var hotKey: HotKey?
     private var settings: SettingsWindowController?
+    private var imageRecordTask: Task<Void, Never>?
 
     static func main() {
         let app = NSApplication.shared
@@ -35,10 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         logged("Purge trash") { try store.purgeExpiredTrash() }
         let monitor = PasteboardMonitor(
             onText: { text in logged("Record clip") { try store.record(text) } },
-            onImage: { data in
-                guard let image = ClipImage(data: data) else { return }
-                logged("Record image") { try store.record(image) }
-            },
+            onImage: { [weak self] data in self?.recordImage(data) },
             onAccessDenied: { [weak self] in self?.updateStatusIcon() }
         )
         monitor.start()
@@ -46,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         panel = PanelController(store: store, thumbnails: thumbnails) { [weak self] content in
             Paster.paste(content)
+            self?.monitor?.ignoreCurrentChange()
             self?.updateStatusIcon()
         }
 
@@ -61,6 +60,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.menu = menu
         statusItem = item
         updateStatusIcon()
+    }
+
+    private func recordImage(_ data: Data) {
+        let copiedAt = Date()
+        let thumbSize = ThumbnailCache.size
+        let previous = imageRecordTask
+        imageRecordTask = Task { @concurrent [weak self] in
+            _ = await previous?.value
+            guard let image = ClipImage(data: data) else { return }
+            let thumbnail = ClipImage.thumbnailPNG(from: image.png, size: thumbSize)
+            await MainActor.run { [weak self] in
+                guard let self, let store = self.store else { return }
+                logged("Record image") { try store.record(image, thumbnail: thumbnail, thumbnailSize: thumbSize, usedAt: copiedAt) }
+                self.panel?.reloadIfVisible()
+            }
+        }
     }
 
     @objc private func togglePanel() {

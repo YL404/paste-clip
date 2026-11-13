@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 /// Polls the general pasteboard; macOS has no change notification for it.
 final class PasteboardMonitor {
@@ -11,6 +12,7 @@ final class PasteboardMonitor {
     private static let imageTypes: [NSPasteboard.PasteboardType] = [
         .png, .tiff,
         NSPasteboard.PasteboardType("public.jpeg"), NSPasteboard.PasteboardType("public.heic"),
+        NSPasteboard.PasteboardType(UTType.webP.identifier), NSPasteboard.PasteboardType("public.webp"),
         NSPasteboard.PasteboardType("com.compuserve.gif"),
     ]
 
@@ -49,6 +51,11 @@ final class PasteboardMonitor {
         self.timer = timer
     }
 
+    /// Skips the current pasteboard change after PasteClip writes to the pasteboard itself.
+    func ignoreCurrentChange() {
+        changeCount = pasteboard.changeCount
+    }
+
     private func poll() {
         let count = pasteboard.changeCount
         guard count != changeCount else { return }
@@ -72,7 +79,7 @@ final class PasteboardMonitor {
             return
         }
         // Some apps declare a single image flavor under a less common UTI.
-        for type in types where type.rawValue.hasPrefix("public.") || type.rawValue == "com.compuserve.gif" {
+        for type in types where !Self.imageTypes.contains(type) && UTType(type.rawValue)?.conforms(to: .image) == true {
             guard let data = pasteboard.data(forType: type) else { continue }
             onImage(data)
             return
