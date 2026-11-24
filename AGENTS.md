@@ -1,109 +1,30 @@
 # AGENTS.md — paste-clip
 
-## 项目
+极简开源 macOS 剪贴板历史 app（作者自用），产品功能和快捷键见 `README.md`。
 
-paste-clip 是一个极简的 macOS 剪贴板历史 app，作者自用，在 GitHub 开源。
+## 范围与硬约束
 
-- 最低系统：macOS 26。不写旧系统兼容代码，不加 `#available` 回退分支。
-- 性能目标：常驻内存尽量低。其他指标不单独优化，但不能因此退化。
-- 功能范围：
-  - 只记录纯文本和图片；其他类型不记录。文字与图片同时存在时按文字记录。
-  - 选中一条历史后，直接粘贴到当前前台 app，并把该记录移到历史顶部。
-  - 文本是网页链接时显示缩略图；YouTube 链接显示视频封面。
-  - 历史条数不设上限。
-  - 可删除单条记录，删除的记录进入回收站。
-    - 进入回收站：⌘T 在历史和回收站之间切换，搜索框右侧也有回收站按钮。
-    - 回收站中：回车恢复到历史顶部，删除键（规则同下方“键盘操作”）永久删除；菜单栏菜单提供“清空回收站”，执行前弹窗确认。
-    - 进入回收站超过 30 天的记录自动永久删除。
-  - 再次复制历史中已有的内容时，把已有记录移到顶部，不新增重复条目。
-    - 回收站中的相同内容不受影响，照常到期清理；历史顶部新增一条记录。
-- 图片：原图保真，统一转成 PNG 按内容 hash 存到 Application Support；GIF 只保留第一帧。
-- 不做：富文本、图片文件、来源 app 图标、收藏/置顶、忽略 app 列表、同步。新增功能先和用户确认。
+- 最低 macOS 26，不写旧系统兼容和 `#available` 回退。
+- 性能优先常驻低内存；其他指标不单独优化但不能退化。
+- UI 全部用 AppKit（Liquid Glass `NSGlassEffectView`），不引入 SwiftUI。
+- 存储用系统 SQLite C API；引入任何第三方依赖前先说明原因并征得同意。
+- **不做**：富文本、图片文件、来源 app 图标、收藏/置顶、忽略 app 列表、同步。新增功能先确认。
 
-## 界面
+## 架构与代码红线
 
-- 不显示 Dock 图标，只保留菜单栏图标，用于打开设置和退出。
-- 设置窗口用 AppKit 实现：修改全局快捷键；开关“开机时自动启动”（`SMAppService.mainApp`，默认关闭）。
-- 全局快捷键默认 ⇧⌘V，可在设置中修改。
-- 面板在鼠标位置弹出，单栏布局：顶部搜索框，下面是历史列表，底部是快捷键提示条。
-  - 拖动底部提示条调整列表高度，松手后记住；记录较少时面板仍按行数缩短。
-  - 缺少剪贴板访问或辅助功能权限时，搜索框下方显示提示和“打开设置”按钮。
-  - 列表每行显示文本；链接或图片有缩略图时，缩略图放在文本右侧，该行相应变高。
-  - 链接去掉 `https://`，域名后的部分用次要色。
-  - 搜索时命中词用半透明黄色记号笔高亮；命中位置被截断时，改为显示命中附近的文字。预览卡片里的命中词同样高亮。
-  - 按住 ⌘ 时，前 9 行右侧显示 ⌘1～⌘9；回收站每行右侧显示剩余天数。
-  - 选中文本显示不全时，列表右侧的预览卡片与选中行对齐，显示全文、复制时间和字数；选中图片时显示图片、尺寸、文件大小和复制时间。
-- 键盘操作：
-  - 弹出后直接输入即搜索，↑↓ 选择，回车粘贴，双击行也粘贴，⌘1～⌘9 粘贴前 9 条，Esc 或点击面板外关闭。
-  - 删除选中记录：搜索框为空时按 ⌫，任何时候都可按 ⌘⌫。搜索框有文字时，⌫ 只编辑搜索框。
-- 视觉：使用 Liquid Glass 材质（`NSGlassEffectView`），跟随系统浅色/深色模式。
-
-## 技术约定
-
-- Swift 6 语言模式，开启完整的严格并发检查。
-- UI 全部用 AppKit（`NSPanel`、`NSTableView`、设置窗口）；项目目前没有 SwiftUI 代码。
-- 存储用系统自带的 SQLite C API。引入任何第三方依赖前，先说明系统 API 为什么不够用，并征得用户同意。
-- 历史不设上限，所以列表和搜索都不能把全部记录读进内存：列表按可见范围分页查询，搜索在 SQLite 中完成。
-- 搜索需要支持中文：用 FTS5 的 trigram 分词；搜索词少于 3 个字符时 trigram 无法匹配，改用子串匹配。
-- 剪贴板监听：轮询 `NSPasteboard.general.changeCount`，只在值变化时读取内容。
-- 剪贴板隐私：
-  - 跳过带有 `org.nspasteboard.ConcealedType` 或 `org.nspasteboard.TransientType` 的条目（密码管理器常用这两种类型标记）。
-  - 处理 macOS 剪贴板访问授权（`NSPasteboard.accessBehavior`），在未授权时给出明确提示，不静默失败。
-  - 日志里不输出剪贴板内容。
-- 粘贴：写回剪贴板后用 `CGEvent` 模拟 ⌘V，依赖辅助功能权限；未授权时引导用户开启。
-- 链接缩略图：
-  - YouTube 封面直接按视频 ID 拼接封面图地址，不抓取网页。
-  - 缩略图缩放到显示尺寸后缓存到磁盘，界面按需加载，不在内存中长期持有原图。
-  - 网络请求必须可取消，失败时静默降级为无缩略图。
-- 图片记录：
-  - 列表显示缩略图和 `图片 宽×高`；这段占位文字参与搜索。
-  - 原图不进 SQLite，也不随列表分页读进内存；按内容 hash 共享同一份文件。
-  - 列表缩略图按显示尺寸缩放后落盘，关面板时只释放内存中的解码图。
-  - 删除记录、清空回收站或清理过期记录时，删除不再被任何行引用的图片文件。
-  - `ClipStore` 会解码并按可见范围缓存行缩略图，因此依赖 AppKit；URL 识别、SQLite 语句和 PNG 规范化仍与界面解耦。
-
-## 代码质量
-
-- 先确认系统框架或现有代码里是否已有实现，再写新代码。
-- 不写为“以后”准备的抽象、配置项或空壳模块。
-- 不用强制解包和 `try!`，除非能证明该处不会失败，并在旁边注释原因。
-- UI 相关类型标注 `@MainActor`；跨隔离域传递的类型要满足 `Sendable`，不用 `@unchecked Sendable` 绕过检查。
-- URL 识别、存储读写等纯逻辑与 AppKit 解耦，便于单独测试。
-- 改动涉及常驻路径（监听、存储、面板、缩略图缓存）时，用 `footprint` 或 Instruments 对比改动前后的内存数据，并在回复中给出数字。
+- 历史不设上限：禁止全量读入内存（列表分页、SQLite 搜索、原图按 hash 落盘并在无引用时删除、缩略图按显示尺寸落盘缓存）。
+- 剪贴板隐私：跳过 `org.nspasteboard.ConcealedType` / `org.nspasteboard.TransientType`；权限缺失时明确提示，不静默失败；日志严禁输出剪贴板内容。
+- 并发与安全：包已默认启用 Swift 6 与 `MainActor` 隔离；不用 `@unchecked Sendable`；除非证明不会失败并注释原因，不用强制解包和 `try!`。
+- URL 识别、SQLite 语句、PNG 规范化等纯逻辑与 AppKit 解耦。
 
 ## 验证与验收
 
-- 构建并打包：`scripts/bundle.sh`（默认 release，传 `debug` 构建调试版），产物为 `build/PasteClip.app`，自动使用本机 Apple Development 证书签名。签名稳定，重新构建后辅助功能授权不会失效。
-- 优先用命令行方式验证：`swift build`、独立 CLI harness。项目目前没有测试 target。
-- 需要运行 app 时，用 `open -g` 在后台启动，不抢占前台焦点。
-- 需要模拟器时，用 `xcrun simctl` 无头启动，不打开 Simulator.app 前台窗口。
-- 必须前台交互才能验收的功能（如全局快捷键、粘贴到前台 app），不自行抢占前台，列出操作步骤和预期结果交给用户手动验收。
+- 构建打包：`scripts/bundle.sh [release|debug]` → `build/PasteClip.app`（自动用本机 Apple Development 证书签名以保持辅助功能授权）。
+- 当前无测试 target，优先用 `swift build` 或独立 CLI harness 验证。
+- 启动 app 用 `open -g` 后台启动，不抢前台焦点；需前台交互的功能（全局快捷键、模拟 ⌘V 粘贴）列出步骤交由用户验收。
 
-## Skills
+## Git 与 Skills
 
-`.agents/skills/` 下是指向本机 Swift skill 的软链接：
-
-- `swift-concurrency`：处理 actor、`Sendable`、`@MainActor` 和并发相关编译警告时使用。
-- `swift-practical-patterns`：做具体实现决策时使用，包括 AppKit 嵌入、构建耗时等。
-- `swiftui-expert-skill`、`swiftui-pro`：只在编写或审查 SwiftUI 代码时使用（当前代码库没有 SwiftUI 界面）。
-
-## Git 工作流
-
-- 默认直接在本地 `main` 上开发。
-- 只有以下情况才新建分支或 worktree，并先告知用户：
-  - 同时进行多个会互相冲突的任务。
-  - 高风险的实验性改动，可能需要整体丢弃。
-  - 需要在改动进行中保持 `main` 随时可构建、可用。
-- 合并回 `main` 后删除对应分支和 worktree。
-
-## 提交规范
-
-- 提交信息用英文，遵循 Conventional Commits：`<type>(<scope>): <subject>`。
-  - type：`feat`、`fix`、`perf`、`refactor`、`test`、`docs`、`build`、`chore`。
-  - scope 可选，用模块名，如 `pasteboard`、`store`、`panel`、`thumbnail`。
-  - subject 用祈使句，小写开头，不加句号，不超过 72 个字符。
-  - 需要说明原因或取舍时写正文，空一行后书写。
-- 一个提交只做一件事。每个提交都应能通过构建。
-- 完成一个已验证的改动后提交；提交前用 `git diff --staged` 核对暂存范围，按文件名暂存，不用 `git add -A`。
-- 不提交构建产物、`.DS_Store`、证书、签名配置等本机文件。
-- 未经用户要求，不 push、不 force push、不改写已推送的历史、不跳过 hooks。
+- 默认直接在本地 `main` 开发；仅在并行冲突、高风险实验或需保持 `main` 可构建时新建分支/worktree（先告知用户，合并后删除）。
+- 验证通过后按文件名暂存并提交，不用 `git add -A`。提交信息用英文 Conventional Commits：`<type>(<scope>): <subject>`（scope 用模块名如 `store`/`panel`/`pasteboard`/`thumbnail`，subject 小写祈使句 ≤72 字符）。
+- `.agents/skills/` 提供 `swift-concurrency`（并发问题）和 `swift-practical-patterns`（AppKit/构建等实现决策）。
