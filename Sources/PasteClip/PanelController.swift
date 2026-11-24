@@ -777,12 +777,13 @@ final class PanelController: NSObject {
         tableView.scrollRowToVisible(row)
     }
 
-    /// History: paste the clip. Trash: restore it to the history.
+    /// History: paste the clip and move it to the top. Trash: restore it to the history.
     private func activate(_ row: Int) {
         guard let clip = clip(at: row) else { return }
         switch list {
         case .history:
             guard let loaded = logged("Load clip content", { try store.content(of: clip.id) }), let content = loaded else { return }
+            logged("Move clip to top") { try store.moveToTop(clip.id) }
             hide()
             onPaste(content)
         case .trash:

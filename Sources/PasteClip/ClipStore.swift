@@ -175,6 +175,14 @@ final class ClipStore {
         // A duplicate leaves the newly written file unreferenced; it is cleaned at launch.
     }
 
+    /// Moves a history clip to the top, as when it is pasted again from the list.
+    func moveToTop(_ id: Int64, usedAt: Date = Date()) throws {
+        try run(
+            "UPDATE clips SET used_at = max(used_at, ?) WHERE id = ? AND deleted_at IS NULL",
+            .real(usedAt.timeIntervalSince1970), .int(id)
+        )
+    }
+
     func moveToTrash(_ id: Int64) throws {
         try run("UPDATE clips SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", .real(now()), .int(id))
     }
