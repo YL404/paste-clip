@@ -80,18 +80,21 @@ private final class ClipRowView: NSTableRowView {
 private final class ClipCellView: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("ClipCell")
     static let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+    static let subtitleFont = NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
     /// A translucent highlighter; weaker on selected rows so it doesn't muddy the selection color.
     static let matchColor = NSColor.systemYellow.withAlphaComponent(0.4)
     static let emphasizedMatchColor = NSColor.systemYellow.withAlphaComponent(0.2)
     /// Space between the cell edge and the label's drawn text, measured from the laid-out cell.
     static let textPadding: CGFloat = 4
     static let spacing: CGFloat = 8
+    static let subtitleSpacing: CGFloat = 2
     static let accessoryFont = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
     /// Gap between the row edge and the thumbnail.
     static let imageInset: CGFloat = 4
     /// Height of a row whose thumbnail sits right of the text.
     static let imageRowHeight = imageInset + ThumbnailCache.size.height + imageInset
 
+    private let subtitleLabel = NSTextField(labelWithString: "")
     private let accessoryLabel = NSTextField(labelWithString: "")
     private let thumbnailView = NSImageView()
 
@@ -100,6 +103,8 @@ private final class ClipCellView: NSTableCellView {
         identifier = Self.identifier
         accessoryLabel.font = Self.accessoryFont
         accessoryLabel.textColor = .secondaryLabelColor
+        accessoryLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        accessoryLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let label = NSTextField(labelWithString: "")
         label.font = Self.font
@@ -107,8 +112,24 @@ private final class ClipCellView: NSTableCellView {
         label.cell?.truncatesLastVisibleLine = true
         label.maximumNumberOfLines = 1
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        // The text stretches, so the accessory sits at the trailing edge.
         label.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
+
+        subtitleLabel.font = Self.subtitleFont
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.lineBreakMode = .byTruncatingTail
+        subtitleLabel.maximumNumberOfLines = 1
+        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        subtitleLabel.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
+        subtitleLabel.isHidden = true
+
+        let textStack = NSStackView(views: [label, subtitleLabel])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = Self.subtitleSpacing
+        textStack.setHuggingPriority(.defaultLow - 1, for: .horizontal)
+        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The text column stretches, so the accessory sits at the trailing edge.
+        textStack.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
 
         thumbnailView.imageScaling = .scaleAxesIndependently
         thumbnailView.wantsLayer = true
@@ -116,7 +137,7 @@ private final class ClipCellView: NSTableCellView {
         thumbnailView.layer?.masksToBounds = true
 
         // Hidden views are detached from the stack, so rows without a thumbnail end with the text.
-        let stack = NSStackView(views: [label, accessoryLabel, thumbnailView])
+        let stack = NSStackView(views: [textStack, accessoryLabel, thumbnailView])
         stack.spacing = Self.spacing
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
@@ -155,10 +176,12 @@ private final class ClipCellView: NSTableCellView {
 
     private var text = RowText(string: "")
 
-    /// `accessory` is short trailing text such as a shortcut hint; nil hides it.
-    func configure(text: RowText, thumbnail: NSImage?, accessory: String?) {
+    /// `subtitle` sits below the main text (e.g. relative copy time); `accessory` is short trailing text.
+    func configure(text: RowText, subtitle: String?, thumbnail: NSImage?, accessory: String?) {
         self.text = text
         textField?.attributedStringValue = Self.attributedText(text, emphasized: backgroundStyle == .emphasized)
+        subtitleLabel.stringValue = subtitle ?? ""
+        subtitleLabel.isHidden = subtitle == nil
         thumbnailView.image = thumbnail
         thumbnailView.isHidden = thumbnail == nil
         accessoryLabel.stringValue = accessory ?? ""
@@ -169,16 +192,19 @@ private final class ClipCellView: NSTableCellView {
         super.prepareForReuse()
         text = RowText(string: "")
         textField?.attributedStringValue = NSAttributedString()
+        subtitleLabel.stringValue = ""
+        subtitleLabel.isHidden = true
         thumbnailView.image = nil
         thumbnailView.isHidden = true
         accessoryLabel.stringValue = ""
         accessoryLabel.isHidden = true
     }
 
-    /// The attributed text carries its own colors, and the accessory sits inside the stack view,
-    /// so both follow the selection style explicitly.
+    /// The attributed text carries its own colors, and labels inside stack views
+    /// do not update automatically, so all follow the selection style explicitly.
     override var backgroundStyle: NSView.BackgroundStyle {
         didSet {
+            subtitleLabel.cell?.backgroundStyle = backgroundStyle
             accessoryLabel.cell?.backgroundStyle = backgroundStyle
             textField?.attributedStringValue = Self.attributedText(text, emphasized: backgroundStyle == .emphasized)
         }
@@ -195,7 +221,8 @@ final class PanelController: NSObject {
     private static let margin: CGFloat = 32
     private static let previewGap: CGFloat = 8
     private static let maxPreviewHeight: CGFloat = 420
-    private static let rowHeight: CGFloat = 32
+    private static let historyRowHeight: CGFloat = 44
+    private static let trashRowHeight: CGFloat = 32
     private static let defaultVisibleRows = 10
     private static let minVisibleRows = 3
     private static let listHeightKey = "PanelListHeight"
@@ -338,7 +365,7 @@ final class PanelController: NSObject {
         tableView.addTableColumn(column)
         tableView.headerView = nil
         tableView.style = .inset
-        tableView.rowHeight = Self.rowHeight
+        tableView.rowHeight = Self.historyRowHeight
         tableView.backgroundColor = .clear
         tableView.refusesFirstResponder = true
         tableView.dataSource = self
@@ -601,17 +628,21 @@ final class PanelController: NSObject {
 
     private var isBannerVisible: Bool { banner?.view.isHidden == false }
 
+    private var baseRowHeight: CGFloat {
+        list == .history ? Self.historyRowHeight : Self.trashRowHeight
+    }
+
     /// Height of a row: rows that show a thumbnail right of the text are taller.
     private func rowHeight(at row: Int) -> CGFloat {
-        guard let clip = clip(at: row) else { return Self.rowHeight }
+        guard let clip = clip(at: row) else { return baseRowHeight }
         if clip.image != nil { return ClipCellView.imageRowHeight }
-        guard let link = clip.link, thumbnails.hasImage(for: link) else { return Self.rowHeight }
+        guard let link = clip.link, thumbnails.hasImage(for: link) else { return baseRowHeight }
         return ClipCellView.imageRowHeight
     }
 
     /// Height of a full compact list, the panel's default size. Thumbnail rows make it show fewer rows.
     private var defaultListHeight: CGFloat {
-        CGFloat(Self.defaultVisibleRows) * (Self.rowHeight + tableView.intercellSpacing.height) + Self.tableInsets
+        CGFloat(Self.defaultVisibleRows) * (baseRowHeight + tableView.intercellSpacing.height) + Self.tableInsets
     }
 
     private func listHeight(rows: Int, upTo limit: CGFloat = .greatestFiniteMagnitude) -> CGFloat {
@@ -901,6 +932,7 @@ extension PanelController: NSTableViewDataSource, NSTableViewDelegate {
         } ?? nil
         cell.configure(
             text: clip.map { display($0, row: row).text } ?? RowText(string: ""),
+            subtitle: list == .history ? clip?.usedAt.formatted(.relative(presentation: .named)) : nil,
             thumbnail: thumbnail,
             accessory: accessory(for: row)
         )

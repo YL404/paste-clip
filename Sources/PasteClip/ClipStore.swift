@@ -13,6 +13,8 @@ struct Clip: Equatable {
     /// nil for a text clip; the SHA256 of the stored PNG for an image clip.
     let image: Data?
     let imageSize: CGSize?
+    /// When the clip was last copied, pasted from history, or restored.
+    let usedAt: Date
     /// When the clip was moved to the trash; nil in the history.
     let deletedAt: Date?
     /// One line of text around the first search match, starting with "…" when it doesn't start
@@ -262,7 +264,7 @@ final class ClipStore {
         try run(
             """
             SELECT c.id, c.preview, c.link, c.kind = 0 AND trim(c.text, char(32, 9, 10, 13)) <> c.preview,
-                c.image, c.image_width, c.image_height, c.deleted_at, p.position,
+                c.image, c.image_width, c.image_height, c.used_at, c.deleted_at, p.position,
                 CASE WHEN p.position > 0 THEN substr(c.text, max(1, p.position - \(Self.matchLead)), \(Self.excerptLength)) END
             FROM (
                 SELECT id, \(order) AS sort, \(position) AS position FROM clips
@@ -273,9 +275,9 @@ final class ClipStore {
             """,
             (term.isEmpty ? [] : [.text(term)]) + values + [.int(Int64(limit)), .int(Int64(offset))]
         ) { statement in
-            let excerpt = Self.string(statement, 9).map { raw in
+            let excerpt = Self.string(statement, 10).map { raw in
                 let line = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-                return sqlite3_column_int64(statement, 8) > Int64(Self.matchLead + 1) ? "…" + line : line
+                return sqlite3_column_int64(statement, 9) > Int64(Self.matchLead + 1) ? "…" + line : line
             }
             clips.append(Clip(
                 id: sqlite3_column_int64(statement, 0),
@@ -284,7 +286,8 @@ final class ClipStore {
                 isAbridged: sqlite3_column_int(statement, 3) != 0,
                 image: Self.blob(statement, 4),
                 imageSize: Self.imageSize(statement, 5, 6),
-                deletedAt: Self.date(statement, 7),
+                usedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 7)),
+                deletedAt: Self.date(statement, 8),
                 matchExcerpt: excerpt
             ))
         }
